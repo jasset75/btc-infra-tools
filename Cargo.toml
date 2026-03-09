@@ -1,0 +1,19 @@
+[workspace]
+members = [
+  "crates/infractl-core",
+  "crates/infractl-adapters",
+  "crates/infractl-cli",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2024"
+license = "MIT OR Apache-2.0"
+version = "0.1.0"
+
+[workspace.dependencies]
+anyhow = "1.0.100"
+clap = { version = "4.5.50", features = ["derive"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.145"
+time = { version = "0.3.44", features = ["serde", "formatting", "parsing"] }

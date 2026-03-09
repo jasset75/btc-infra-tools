@@ -35,7 +35,7 @@ Proposed internal layout:
 
 3. `crates/infractl-cli`
 - Command-line UX + TUI (`clap` + `ratatui`).
-- Produces the `infractl` binary.
+- Produces the `belter` binary.
 
 4. `docs/spec`
 - Versioned configuration schema and examples.
@@ -68,7 +68,7 @@ Rationale:
 - `--tui` preserves convenience and meets the explicit requirement.
 
 ## Agnostic Configuration Model (v0)
-Suggested file: `infractl.toml`
+Suggested file: `belter.toml`
 
 ```toml
 version = 1
@@ -107,7 +107,7 @@ expect = "status == 200"
 
 ## Initial Command Tree
 ```text
-infractl
+belter
   config
     init
     validate

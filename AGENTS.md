@@ -15,7 +15,7 @@ All contributors (human or AI agents) must follow these rules.
 - If user input is not in English, keep responses concise but produce repository artifacts in English.
 
 ## Product Direction
-- Current strategy: monorepo, single binary (`infractl`).
+- Current strategy: monorepo, single binary (`belter`).
 - Architecture target:
   - `crates/infractl-core`
   - `crates/infractl-adapters`
@@ -28,7 +28,7 @@ All contributors (human or AI agents) must follow these rules.
 ## Configuration Principles
 - Tool behavior must be infrastructure-agnostic.
 - Infrastructure specifics belong to external config, not hardcoded logic.
-- Default config format: TOML (`infractl.toml`) unless superseded by an explicit decision.
+- Default config format: TOML (`belter.toml`) unless superseded by an explicit decision.
 - Secrets must never be committed.
 
 ## Operational Safety

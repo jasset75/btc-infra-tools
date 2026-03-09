@@ -1,0 +1,10 @@
+[package]
+name = "infractl-core"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+serde.workspace = true
+time.workspace = true
+
