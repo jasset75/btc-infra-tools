@@ -1,4 +1,4 @@
-# RFC 0001 - Infra Control CLI/TUI (Rust, agnostic, monorepo-first)
+# Architecture - Belter CLI/TUI (Rust, infrastructure-agnostic)
 
 ## Goal
 Design an operations tool with both CLI and TUI interfaces, reusable across different infrastructure setups through declarative configuration.
@@ -62,6 +62,7 @@ Compatibility rule to keep split cost low:
 For dual-mode commands:
 - Recommended option: `--ui <auto|cli|tui>` (default: `auto`).
 - Ergonomic alias: `--tui` (equivalent to `--ui tui`).
+- `--ui` and `--tui` are mutually exclusive in the parser.
 
 Rationale:
 - `--ui` scales better for future UI modes (`web`, custom views, etc.).
@@ -70,6 +71,11 @@ Rationale:
 ## Agnostic Configuration Model (v0)
 Suggested file: `belter.toml`
 
+Configuration policy:
+- Default format is `TOML`.
+- Use `YAML` only when a specific integration/tooling path explicitly requires it.
+- Tracked config files should keep environment placeholders (for example `${MEMPOOL_HOST}`) instead of host-specific values.
+
 ```toml
 version = 1
 environment = "home-lab"
@@ -77,7 +83,7 @@ environment = "home-lab"
 [service.bitcoind]
 manager = "launchd"
 unit = "system/com.bitcoind.node"
-workdir = "/"
+workdir = "."
 tags = ["bitcoin", "core"]
 
 [service.stratum]
@@ -87,8 +93,8 @@ tags = ["mining", "stratum"]
 
 [service.mempool]
 manager = "podman_compose"
-compose_file = "~/work/public-pool-local/ops/mempool/upstream/docker/docker-compose.yml"
-compose_override = "~/work/public-pool-local/ops/mempool/config/docker-compose.override.yml"
+compose_file = "./ops/mempool/upstream/docker/docker-compose.yml"
+compose_override = "./ops/mempool/config/docker-compose.override.yml"
 project = "docker"
 tags = ["explorer"]
 
@@ -137,6 +143,5 @@ belter
 6. Environment profiles (`home-lab`, `staging`, `prod`) with inheritance.
 
 ## Open Decisions
-1. Official config format: `TOML` vs `YAML`.
-2. Secret handling strategy: environment variables vs secret backend.
-3. Extensibility model: built-in adapters vs external plugin system.
+1. Secret handling strategy: environment variables vs secret backend.
+2. Extensibility model: built-in adapters vs external plugin system.

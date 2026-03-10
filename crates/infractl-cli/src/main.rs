@@ -1,7 +1,10 @@
-use anyhow::Result;
+use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use infractl_core::config::{DEFAULT_CONFIG_FILE, default_config_template};
 use infractl_core::output::OutputEnvelope;
 use infractl_core::time::now_utc_rfc3339;
+use std::fs;
+use std::path::PathBuf;
 
 #[derive(Debug, Parser)]
 #[command(name = "belter", version, about = "Infrastructure control CLI/TUI")]
@@ -39,7 +42,12 @@ enum Command {
 
 #[derive(Debug, Subcommand)]
 enum ConfigCommand {
-    Init,
+    Init {
+        #[arg(long, help = "Write config file to a custom path")]
+        path: Option<PathBuf>,
+        #[arg(long, help = "Overwrite target file if it already exists")]
+        force: bool,
+    },
     Validate,
     Show,
 }
@@ -104,15 +112,19 @@ enum UiMode {
 
 #[derive(Debug, Args)]
 struct UiArgs {
-    #[arg(long, value_enum, default_value = "auto")]
-    ui: UiMode,
-    #[arg(long, help = "Alias for --ui tui")]
+    #[arg(long, value_enum)]
+    ui: Option<UiMode>,
+    #[arg(long, conflicts_with = "ui", help = "Shortcut for --ui tui")]
     tui: bool,
 }
 
 impl UiArgs {
     fn effective(self) -> UiMode {
-        if self.tui { UiMode::Tui } else { self.ui }
+        if self.tui {
+            UiMode::Tui
+        } else {
+            self.ui.unwrap_or(UiMode::Auto)
+        }
     }
 }
 
@@ -120,7 +132,15 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Command::Config { command } => match command {
-            ConfigCommand::Init => emit(cli.json, "config.init", "initialized config template"),
+            ConfigCommand::Init { path, force } => {
+                let target = path.unwrap_or_else(|| PathBuf::from(DEFAULT_CONFIG_FILE));
+                init_config_file(&target, force)?;
+                emit(
+                    cli.json,
+                    "config.init",
+                    &format!("created configuration file at {}", target.display()),
+                )
+            }
             ConfigCommand::Validate => emit(cli.json, "config.validate", "configuration is valid"),
             ConfigCommand::Show => emit(cli.json, "config.show", "showing effective configuration"),
         },
@@ -193,5 +213,25 @@ fn emit(json: bool, command: &str, message: &str) -> Result<()> {
     } else {
         println!("[{}] {}: {}", out.ts, out.command, out.message);
     }
+    Ok(())
+}
+
+fn init_config_file(path: &PathBuf, force: bool) -> Result<()> {
+    if path.exists() && !force {
+        bail!(
+            "config file already exists at {} (use --force to overwrite)",
+            path.display()
+        );
+    }
+
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create directory {}", parent.display()))?;
+    }
+
+    fs::write(path, default_config_template())
+        .with_context(|| format!("failed to write config file {}", path.display()))?;
     Ok(())
 }
