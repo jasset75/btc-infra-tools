@@ -83,7 +83,7 @@ environment = "home-lab"
 [service.bitcoind]
 manager = "launchd"
 unit = "system/com.bitcoind.node"
-workdir = "."
+workdir = "${BITCOIND_WORKDIR}"
 tags = ["bitcoin", "core"]
 
 [service.stratum]
@@ -93,21 +93,21 @@ tags = ["mining", "stratum"]
 
 [service.mempool]
 manager = "podman_compose"
-compose_file = "./ops/mempool/upstream/docker/docker-compose.yml"
-compose_override = "./ops/mempool/config/docker-compose.override.yml"
+compose_file = "${MEMPOOL_COMPOSE_FILE}"
+compose_override = "${MEMPOOL_COMPOSE_OVERRIDE}"
 project = "docker"
 tags = ["explorer"]
 
 [[check]]
 id = "core_tip"
 type = "command"
-cmd = "bitcoin-cli -datadir=/Volumes/BTCNODE/bitcoin getblockcount"
+cmd = "bitcoin-cli -datadir=${BITCOIND_DATADIR} getblockcount"
 expect = "exit_code == 0"
 
 [[check]]
 id = "mempool_backend_info"
 type = "http"
-url = "http://127.0.0.1:8080/api/v1/backend-info"
+url = "http://${MEMPOOL_HOST}:${MEMPOOL_PORT}/api/v1/backend-info"
 expect = "status == 200"
 ```
 
