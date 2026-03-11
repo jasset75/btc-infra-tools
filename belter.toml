@@ -1,10 +1,10 @@
 version = 1
 environment = "default"
 
-[service.example]
+[service.bitcoind]
 manager = "launchd"
-unit = "system/com.example.service"
-tags = ["example"]
+unit = "${BITCOIND_LAUNCHD_UNIT}"
+tags = ["bitcoin", "core"]
 
 [[check]]
 id = "example_http_health"
