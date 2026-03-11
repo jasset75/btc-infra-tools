@@ -1,0 +1,3 @@
+[tools]
+lefthook = "1.11.13"
+rust = "latest"
