@@ -29,11 +29,13 @@ cargo run -p belter -- health snapshot --json
 By default, HTTP checks can reference:
 - `MEMPOOL_HOST`
 - `MEMPOOL_PORT`
+- `BITCOIND_LAUNCHD_UNIT` (for `service restart bitcoind`)
 
 Example:
 ```bash
 cp .env.example .env
 cargo run -p belter -- config init --force
+cargo run -p belter -- --config belter.toml service restart bitcoind
 ```
 
 Generated URL example:
@@ -48,6 +50,20 @@ Feature delivery follows this loop:
 Versioning policy:
 - Each delivered feature should be recorded in `CHANGELOG.md`.
 - Project version should be bumped according to semantic versioning as features are released.
+
+## Git Hooks
+This repository uses `lefthook` to run local quality gates before push.
+
+Pre-push checks:
+1. `cargo check -p belter`
+2. `cargo clippy --all-targets --all-features -- -D warnings`
+3. `cargo test --all-targets`
+
+Setup:
+```bash
+mise install
+lefthook install
+```
 
 ## License
 Licensed under either of:

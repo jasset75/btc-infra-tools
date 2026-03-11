@@ -8,6 +8,7 @@ Status:
 
 ## Global Options
 - `--json`: emit structured JSON output instead of human-readable text.
+- `--config <PATH>`: path to config file (default: `belter.toml`).
 
 ## Command Tree
 ```text
@@ -69,7 +70,13 @@ Scaffold command; currently echoes the requested target.
 Scaffold command; currently echoes the requested target.
 
 ### `service restart <name>`
-Scaffold command; currently echoes the requested target.
+Implemented for `launchd` services.
+
+Behavior:
+- Loads `service.<name>` from `belter.toml`.
+- Requires `manager = "launchd"` and a `unit` value.
+- Expands `${ENV_VAR}` placeholders in `unit` from process environment variables.
+- Executes `launchctl kickstart -k <unit>`.
 
 ### `service logs <name>`
 Scaffold command; currently echoes target and follow mode.

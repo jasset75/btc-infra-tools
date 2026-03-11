@@ -82,7 +82,7 @@ environment = "home-lab"
 
 [service.bitcoind]
 manager = "launchd"
-unit = "system/com.bitcoind.node"
+unit = "${BITCOIND_LAUNCHD_UNIT}"
 workdir = "${BITCOIND_WORKDIR}"
 tags = ["bitcoin", "core"]
 
