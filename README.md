@@ -19,6 +19,40 @@ cargo run -p belter -- service status bitcoind --ui tui
 cargo run -p belter -- health snapshot --json
 ```
 
+## Operator Setup (macOS, repo-local mise)
+
+Recommended host layout for node operations:
+
+```text
+~/work/btc-infra/
+|- ops/        # private operational docs/scripts
+`- upstream/
+   `- btc-infra-tools/   # public upstream clone
+```
+
+Bootstrap (without global Rust install):
+
+```bash
+cd ~/work/btc-infra/upstream
+git clone https://github.com/jasset75/btc-infra-tools.git
+cd btc-infra-tools
+
+mise trust
+mise use rust@stable
+mise install
+
+mise exec -- cargo --version
+mise exec -- rustc --version
+```
+
+Smoke test:
+
+```bash
+mise exec -- cargo run -p belter -- --help
+mise exec -- cargo run -p belter -- service list
+mise exec -- cargo run -p belter -- health snapshot --json
+```
+
 ## Preconditions
 - Current practical integration target is `bitcoind` managed by `launchd`.
 - Environment-specific values must be provided through local `.env` and config files.
