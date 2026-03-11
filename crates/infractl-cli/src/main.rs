@@ -1,8 +1,10 @@
 use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use infractl_core::config::{DEFAULT_CONFIG_FILE, default_config_template};
+use infractl_adapters::LaunchdAdapter;
+use infractl_core::config::{BelterConfig, DEFAULT_CONFIG_FILE, default_config_template};
 use infractl_core::output::OutputEnvelope;
 use infractl_core::time::now_utc_rfc3339;
+use std::env;
 use std::fs;
 use std::path::PathBuf;
 
@@ -11,6 +13,14 @@ use std::path::PathBuf;
 struct Cli {
     #[command(subcommand)]
     command: Command,
+
+    #[arg(
+        long,
+        global = true,
+        default_value = DEFAULT_CONFIG_FILE,
+        help = "Path to belter config file"
+    )]
+    config: PathBuf,
 
     #[arg(long, global = true, help = "Emit machine-readable JSON output")]
     json: bool,
@@ -171,7 +181,7 @@ fn main() -> Result<()> {
             ServiceCommand::Restart { name } => emit(
                 cli.json,
                 "service.restart",
-                &format!("restart requested for {name}"),
+                &restart_service_from_config(&cli.config, &name)?,
             ),
             ServiceCommand::Logs { name, follow } => emit(
                 cli.json,
@@ -234,4 +244,64 @@ fn init_config_file(path: &PathBuf, force: bool) -> Result<()> {
     fs::write(path, default_config_template())
         .with_context(|| format!("failed to write config file {}", path.display()))?;
     Ok(())
+}
+
+fn restart_service_from_config(config_path: &PathBuf, service_name: &str) -> Result<String> {
+    let raw = fs::read_to_string(config_path)
+        .with_context(|| format!("failed to read config file {}", config_path.display()))?;
+    let config: BelterConfig = toml::from_str(&raw)
+        .with_context(|| format!("failed to parse TOML from {}", config_path.display()))?;
+
+    let services = config
+        .service
+        .ok_or_else(|| anyhow::anyhow!("missing [service] section"))?;
+    let service = services
+        .get(service_name)
+        .ok_or_else(|| anyhow::anyhow!("service `{service_name}` not found in config"))?;
+
+    if service.manager != "launchd" {
+        bail!(
+            "service `{service_name}` uses manager `{}`; only `launchd` restart is implemented",
+            service.manager
+        );
+    }
+
+    let unit = service
+        .unit
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("service `{service_name}` is missing `unit`"))?;
+    let resolved_unit = expand_env_placeholders(unit)?;
+
+    let adapter = LaunchdAdapter;
+    adapter.restart_unit(&resolved_unit)?;
+
+    Ok(format!(
+        "restarted service `{service_name}` via launchd unit `{resolved_unit}`"
+    ))
+}
+
+fn expand_env_placeholders(input: &str) -> Result<String> {
+    let mut out = input.to_string();
+    let mut cursor = 0;
+
+    while let Some(start_rel) = out[cursor..].find("${") {
+        let start = cursor + start_rel;
+        let after_start = start + 2;
+        let Some(end_rel) = out[after_start..].find('}') else {
+            bail!("unterminated placeholder in `{input}`");
+        };
+        let end = after_start + end_rel;
+        let key = &out[after_start..end];
+
+        if key.is_empty() {
+            bail!("empty placeholder in `{input}`");
+        }
+
+        let value = env::var(key)
+            .with_context(|| format!("missing environment variable `{key}` for `{input}`"))?;
+        out.replace_range(start..=end, &value);
+        cursor = start + value.len();
+    }
+
+    Ok(out)
 }
