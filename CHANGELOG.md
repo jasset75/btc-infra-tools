@@ -20,6 +20,10 @@ The project follows semantic versioning.
 - Updated scaffold template to include `service.bitcoind` with `unit = "${BITCOIND_LAUNCHD_UNIT}"`.
 - Added `lefthook` pre-push configuration to enforce local `check`, `clippy`, and `test` gates.
 - Added `.mise.toml` with `lefthook` tool pin so hook tooling is installable in remote/reproducible environments.
+- Added automatic `.env` loading at CLI startup when `.env` exists in the current working directory.
+- Improved launchd restart error UX with actionable guidance for:
+  - invalid target format (requires `<domain>/<label>`, for example `system/com.bitcoind.node`)
+  - insufficient privileges for `system/...` units (use elevated execution)
 
 ## [0.1.0] - 2026-03-10
 

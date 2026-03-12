@@ -1,5 +1,8 @@
 # Command Reference (WIP)
 
+This file is kept for backward compatibility.
+Use the maintained reference at [belter-command-reference.md](belter-command-reference.md).
+
 This document describes the current `belter` command surface from the scaffold implementation.
 
 Status:

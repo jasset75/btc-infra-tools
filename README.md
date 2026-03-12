@@ -4,7 +4,6 @@ Monorepo for `belter`, a Rust CLI/TUI for infrastructure operations.
 
 ## Initial Architecture
 - Design decisions and initial scope: [Architecture](docs/architecture.md)
-- Current command surface (WIP): [Command Reference](docs/command-reference.md)
 - Feature and release history: [CHANGELOG](CHANGELOG.md)
 
 ## Workspace Layout
@@ -13,11 +12,17 @@ Monorepo for `belter`, a Rust CLI/TUI for infrastructure operations.
 - `crates/infractl-cli`: `belter` binary (`clap`-based)
 
 ## Quick Start
-```bash
-cargo run -p belter -- service list
-cargo run -p belter -- service status bitcoind --ui tui
-cargo run -p belter -- health snapshot --json
-```
+- Build and run a first command: `cargo run -p belter -- service list`
+
+## Command Reference
+
+### Belter CLI
+- Detailed command/flag reference: [docs/belter-command-reference.md](docs/belter-command-reference.md)
+- Current features:
+  - Config-driven `service restart <name>` for `launchd`.
+  - `${ENV_VAR}` expansion in service `unit`.
+  - Automatic `.env` loading from current working directory.
+  - Actionable launchd restart errors for target format and privilege requirements.
 
 ## Operator Setup (macOS, repo-local mise)
 
@@ -69,7 +74,6 @@ Example:
 ```bash
 cp .env.example .env
 cargo run -p belter -- config init --force
-cargo run -p belter -- --config belter.toml service restart bitcoind
 ```
 
 Generated URL example:

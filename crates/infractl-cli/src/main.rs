@@ -139,6 +139,7 @@ impl UiArgs {
 }
 
 fn main() -> Result<()> {
+    load_dotenv_if_present()?;
     let cli = Cli::parse();
     match cli.command {
         Command::Config { command } => match command {
@@ -208,6 +209,17 @@ fn main() -> Result<()> {
             TuiCommand::Dashboard => emit(cli.json, "tui.dashboard", "starting dashboard"),
         },
     }
+}
+
+fn load_dotenv_if_present() -> Result<()> {
+    let path = PathBuf::from(".env");
+    if !path.exists() {
+        return Ok(());
+    }
+
+    dotenvy::from_filename(&path)
+        .with_context(|| format!("failed to load environment from {}", path.display()))?;
+    Ok(())
 }
 
 fn emit(json: bool, command: &str, message: &str) -> Result<()> {
