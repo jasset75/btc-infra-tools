@@ -50,6 +50,27 @@ mise exec -- cargo --version
 mise exec -- rustc --version
 ```
 
+Install `belter` binary for direct use (`belter <args>`):
+
+> *Just once, after initial mise install:*
+```bash
+mise exec -- cargo install --path crates/infractl-cli --locked --root ~/.local
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc
+source ~/.zshrc
+belter --version
+```
+
+Tip: update from repo and rebuild installed binary:
+> *Every time you want to update:*
+```bash
+git pull --ff-only origin main
+mise exec -- cargo install --path crates/infractl-cli --locked --root ~/.local --force
+belter --version
+```
+
+- `--force`: reinstalls even when Cargo would otherwise skip installation.
+- `--locked`: uses the repository `Cargo.lock` for reproducible dependency versions.
+
 Smoke test:
 
 ```bash
