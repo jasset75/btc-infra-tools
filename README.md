@@ -20,7 +20,7 @@ Monorepo for `belter`, a Rust CLI/TUI for infrastructure operations.
 ### Belter CLI
 - Detailed command/flag reference: [docs/belter-command-reference.md](docs/belter-command-reference.md)
 - Current features:
-  - Config-driven `service start|stop|restart <name>` for `launchd`.
+  - Config-driven `service start|stop|restart <name>` for `launchd` and `podman_compose`.
   - `${ENV_VAR}` expansion in service `unit`.
   - Automatic `.env` loading from current working directory.
   - Actionable launchd restart errors for target format and privilege requirements.

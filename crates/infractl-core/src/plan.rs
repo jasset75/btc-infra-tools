@@ -12,6 +12,21 @@ pub enum Operation {
     RestartLaunchdService {
         unit: String,
     },
+    StartPodmanComposeService {
+        compose_file: String,
+        compose_override: Option<String>,
+        project: Option<String>,
+    },
+    StopPodmanComposeService {
+        compose_file: String,
+        compose_override: Option<String>,
+        project: Option<String>,
+    },
+    RestartPodmanComposeService {
+        compose_file: String,
+        compose_override: Option<String>,
+        project: Option<String>,
+    },
 }
 
 /// An ordered set of operations produced by a use case.

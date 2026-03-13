@@ -1,15 +1,17 @@
-use crate::LaunchdAdapter;
+use crate::{LaunchdAdapter, PodmanComposeAdapter};
 use infractl_core::plan::{Executor, Operation, Plan};
 use std::io::Write;
 
 pub struct RealExecutor {
     launchd: LaunchdAdapter,
+    podman_compose: PodmanComposeAdapter,
 }
 
 impl RealExecutor {
     pub fn new() -> Self {
         Self {
             launchd: LaunchdAdapter,
+            podman_compose: PodmanComposeAdapter,
         }
     }
 }
@@ -27,6 +29,33 @@ impl Executor for RealExecutor {
                 Operation::StartLaunchdService { unit } => self.launchd.start_unit(unit)?,
                 Operation::StopLaunchdService { unit } => self.launchd.stop_unit(unit)?,
                 Operation::RestartLaunchdService { unit } => self.launchd.restart_unit(unit)?,
+                Operation::StartPodmanComposeService {
+                    compose_file,
+                    compose_override,
+                    project,
+                } => self.podman_compose.start(
+                    compose_file,
+                    compose_override.as_deref(),
+                    project.as_deref(),
+                )?,
+                Operation::StopPodmanComposeService {
+                    compose_file,
+                    compose_override,
+                    project,
+                } => self.podman_compose.stop(
+                    compose_file,
+                    compose_override.as_deref(),
+                    project.as_deref(),
+                )?,
+                Operation::RestartPodmanComposeService {
+                    compose_file,
+                    compose_override,
+                    project,
+                } => self.podman_compose.restart(
+                    compose_file,
+                    compose_override.as_deref(),
+                    project.as_deref(),
+                )?,
             }
         }
         Ok(())
@@ -77,6 +106,42 @@ impl<W: Write> Executor for DryRunExecutor<W> {
                     i + 1,
                     unit
                 )?,
+                Operation::StartPodmanComposeService {
+                    compose_file,
+                    compose_override,
+                    project,
+                } => writeln!(
+                    self.writer,
+                    "  [DRY-RUN] {}. Would start `podman_compose` project {:?} with base `{}` override {:?}",
+                    i + 1,
+                    project,
+                    compose_file,
+                    compose_override
+                )?,
+                Operation::StopPodmanComposeService {
+                    compose_file,
+                    compose_override,
+                    project,
+                } => writeln!(
+                    self.writer,
+                    "  [DRY-RUN] {}. Would stop `podman_compose` project {:?} with base `{}` override {:?}",
+                    i + 1,
+                    project,
+                    compose_file,
+                    compose_override
+                )?,
+                Operation::RestartPodmanComposeService {
+                    compose_file,
+                    compose_override,
+                    project,
+                } => writeln!(
+                    self.writer,
+                    "  [DRY-RUN] {}. Would restart `podman_compose` project {:?} with base `{}` override {:?}",
+                    i + 1,
+                    project,
+                    compose_file,
+                    compose_override
+                )?,
             }
         }
         Ok(())
@@ -103,5 +168,25 @@ mod tests {
 
         let rendered = String::from_utf8(output).expect("writer should contain utf8");
         assert!(rendered.contains("Would restart `launchd` unit `system/com.bitcoind.node`"));
+    }
+
+    #[test]
+    fn dry_run_executor_renders_podman_compose_operations() {
+        let mut output = Vec::new();
+        let mut executor = DryRunExecutor::new(&mut output);
+        let plan = Plan {
+            operations: vec![Operation::RestartPodmanComposeService {
+                compose_file: "/tmp/base.yml".to_string(),
+                compose_override: Some("/tmp/override.yml".to_string()),
+                project: Some("docker".to_string()),
+            }],
+        };
+
+        executor
+            .execute(&plan)
+            .expect("dry-run execution should succeed");
+
+        let rendered = String::from_utf8(output).expect("writer should contain utf8");
+        assert!(rendered.contains("Would restart `podman_compose` project Some(\"docker\")"));
     }
 }

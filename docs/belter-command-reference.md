@@ -132,6 +132,7 @@ belter
 - Behavior:
   - Loads `service.<name>` from config.
   - `launchd`: executes start against configured `unit`.
+  - `podman_compose`: executes `podman compose ... up -d` using configured compose file(s) and optional project.
   - `--dry-run`: emits preview events and serialized plan without executing commands.
   - `--json`: returns machine-readable envelope including `plan` and `events`.
 
@@ -141,6 +142,7 @@ belter
 - Behavior:
   - Loads `service.<name>` from config.
   - `launchd`: executes stop against configured `unit`.
+  - `podman_compose`: executes `podman compose ... down` using configured compose file(s) and optional project.
   - `--dry-run`: emits preview events and serialized plan without executing commands.
   - `--json`: returns machine-readable envelope including `plan` and `events`.
 
@@ -151,12 +153,21 @@ belter
   - Loads `service.<name>` from config.
   - Expands `${ENV_VAR}` placeholders from environment.
   - `launchd`: requires `unit` and runs `launchctl kickstart -k <unit>`.
+  - `podman_compose`: requires `compose_file`; optional `compose_override` and `project`.
+  - `podman_compose` restart is implemented as `podman compose ... down` followed by `podman compose ... up -d`.
   - If `.env` exists in current directory, it is autoloaded before command execution.
   - `--dry-run`: emits preview events and serialized plan without executing commands.
   - `--json`: returns machine-readable envelope including `plan` and `events`.
 - Operational notes:
   - For launchd units in `system/...`, restart may require elevation (`sudo -E`).
   - Unit must be full launchd target (`<domain>/<label>`, for example `system/com.bitcoind.node`).
+
+Example for `mempool`:
+
+```bash
+belter --config belter.toml service restart mempool
+belter --config belter.toml --dry-run --json service start mempool
+```
 
 ### `service logs <name>`
 - Parameters:

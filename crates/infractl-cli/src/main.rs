@@ -457,6 +457,39 @@ fn dry_run_event(
                 "unit": unit,
             }),
         },
+        Operation::StartPodmanComposeService {
+            compose_file,
+            compose_override,
+            project,
+        }
+        | Operation::StopPodmanComposeService {
+            compose_file,
+            compose_override,
+            project,
+        }
+        | Operation::RestartPodmanComposeService {
+            compose_file,
+            compose_override,
+            project,
+        } => OutputEvent {
+            ts: clock.now_utc_rfc3339(),
+            level: SeverityLevel::Info,
+            code: format!("service.{}.preview", action_label(action)),
+            message: format!(
+                "{}. Would {} `podman_compose` project {:?}",
+                index + 1,
+                action_label(action),
+                project
+            ),
+            details: json!({
+                "operation_index": index + 1,
+                "action": action_label(action),
+                "manager": "podman_compose",
+                "compose_file": compose_file,
+                "compose_override": compose_override,
+                "project": project,
+            }),
+        },
     }
 }
 
@@ -511,6 +544,37 @@ mod tests {
                 "action": "restart",
                 "manager": "launchd",
                 "unit": "system/com.bitcoind.node",
+            })
+        );
+    }
+
+    #[test]
+    fn dry_run_event_renders_podman_compose_shape() {
+        let clock = FixedClock::new("2026-03-12T10:00:00Z");
+        let event = dry_run_event(
+            &clock,
+            ServiceAction::Start,
+            0,
+            &Operation::StartPodmanComposeService {
+                compose_file: "/tmp/base.yml".to_string(),
+                compose_override: Some("/tmp/override.yml".to_string()),
+                project: Some("docker".to_string()),
+            },
+        );
+
+        assert_eq!(event.ts, "2026-03-12T10:00:00Z");
+        assert_eq!(event.level, SeverityLevel::Info);
+        assert_eq!(event.code, "service.start.preview");
+        assert_eq!(event.message, "1. Would start `podman_compose` project Some(\"docker\")");
+        assert_eq!(
+            event.details,
+            json!({
+                "operation_index": 1,
+                "action": "start",
+                "manager": "podman_compose",
+                "compose_file": "/tmp/base.yml",
+                "compose_override": "/tmp/override.yml",
+                "project": "docker",
             })
         );
     }

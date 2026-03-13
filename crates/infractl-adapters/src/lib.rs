@@ -26,7 +26,9 @@ impl LaunchdAdapter {
     }
 
     fn run_launchctl(&self, args: &[&str], unit: &str, action: &str) -> Result<()> {
-        let output = Command::new("launchctl").args(args).output()?;
+        let output = Command::new("launchctl")
+            .args(args)
+            .output()?;
 
         if output.status.success() {
             return Ok(());
@@ -51,6 +53,75 @@ impl LaunchdAdapter {
         bail!(
             "launchctl {action} failed for unit {unit} (status={:?}, stdout={stdout}, stderr={stderr})",
             code,
+        )
+    }
+}
+
+pub struct PodmanComposeAdapter;
+
+impl PodmanComposeAdapter {
+    pub fn start(
+        &self,
+        compose_file: &str,
+        compose_override: Option<&str>,
+        project: Option<&str>,
+    ) -> Result<()> {
+        self.run_compose(compose_file, compose_override, project, &["up", "-d"], "start")
+    }
+
+    pub fn stop(
+        &self,
+        compose_file: &str,
+        compose_override: Option<&str>,
+        project: Option<&str>,
+    ) -> Result<()> {
+        self.run_compose(compose_file, compose_override, project, &["down"], "stop")
+    }
+
+    pub fn restart(
+        &self,
+        compose_file: &str,
+        compose_override: Option<&str>,
+        project: Option<&str>,
+    ) -> Result<()> {
+        self.run_compose(compose_file, compose_override, project, &["down"], "restart")?;
+        self.run_compose(
+            compose_file,
+            compose_override,
+            project,
+            &["up", "-d"],
+            "restart",
+        )
+    }
+
+    fn run_compose(
+        &self,
+        compose_file: &str,
+        compose_override: Option<&str>,
+        project: Option<&str>,
+        action_args: &[&str],
+        action: &str,
+    ) -> Result<()> {
+        let mut args = vec!["compose"];
+        if let Some(project) = project {
+            args.extend(["-p", project]);
+        }
+        args.extend(["-f", compose_file]);
+        if let Some(compose_override) = compose_override {
+            args.extend(["-f", compose_override]);
+        }
+        args.extend(action_args);
+
+        let output = Command::new("podman").args(&args).output()?;
+        if output.status.success() {
+            return Ok(());
+        }
+
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let code = output.status.code();
+        bail!(
+            "podman compose {action} failed (compose_file={compose_file}, override={compose_override:?}, project={project:?}, status={code:?}, stdout={stdout}, stderr={stderr})"
         )
     }
 }
