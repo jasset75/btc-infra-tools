@@ -5,6 +5,7 @@ use infractl_core::env::{EnvResolver, ProcessEnvResolver};
 use infractl_core::output::{OutputEnvelope, OutputEvent, SeverityLevel};
 use infractl_core::plan::{Operation, Plan};
 use infractl_core::time::{Clock, SystemClock};
+use infractl_core::usecase::{ServiceAction, ServiceCommandRequest};
 use serde_json::{Value, json};
 use std::fs;
 use std::path::PathBuf;
@@ -195,28 +196,45 @@ fn main() -> Result<()> {
                     &format!("status target={service} ui={:?}", ui.effective()),
                 )
             }
-            ServiceCommand::Start { name } => emit(
+            ServiceCommand::Start { name } => emit_plan(
                 &deps.clock,
                 cli.json,
+                cli.dry_run,
                 "service.start",
-                &format!("start requested for {name}"),
+                execute_service_command_from_config(
+                    &deps.clock,
+                    &deps.env_resolver,
+                    &cli.config,
+                    &name,
+                    ServiceAction::Start,
+                    cli.dry_run,
+                ),
             ),
-            ServiceCommand::Stop { name } => emit(
+            ServiceCommand::Stop { name } => emit_plan(
                 &deps.clock,
                 cli.json,
+                cli.dry_run,
                 "service.stop",
-                &format!("stop requested for {name}"),
+                execute_service_command_from_config(
+                    &deps.clock,
+                    &deps.env_resolver,
+                    &cli.config,
+                    &name,
+                    ServiceAction::Stop,
+                    cli.dry_run,
+                ),
             ),
             ServiceCommand::Restart { name } => emit_plan(
                 &deps.clock,
                 cli.json,
                 cli.dry_run,
                 "service.restart",
-                restart_service_from_config(
+                execute_service_command_from_config(
                     &deps.clock,
                     &deps.env_resolver,
                     &cli.config,
                     &name,
+                    ServiceAction::Restart,
                     cli.dry_run,
                 ),
             ),
@@ -352,11 +370,12 @@ fn init_config_file(path: &PathBuf, force: bool) -> Result<()> {
     Ok(())
 }
 
-fn restart_service_from_config(
+fn execute_service_command_from_config(
     clock: &dyn Clock,
     env_resolver: &dyn EnvResolver,
     config_path: &PathBuf,
     service_name: &str,
+    action: ServiceAction,
     dry_run: bool,
 ) -> Result<PlanExecutionResult> {
     let raw = fs::read_to_string(config_path)
@@ -364,9 +383,10 @@ fn restart_service_from_config(
     let config: BelterConfig = toml::from_str(&raw)
         .with_context(|| format!("failed to parse TOML from {}", config_path.display()))?;
 
-    let req = infractl_core::usecase::RestartServiceRequest {
+    let req = ServiceCommandRequest {
         config: &config,
         service_name,
+        action,
     };
 
     let plan = req.plan(env_resolver)?;
@@ -376,10 +396,10 @@ fn restart_service_from_config(
     if dry_run {
         let mut executor = infractl_adapters::executor::DryRunExecutor::sink();
         executor.execute(&plan)?;
-        let events = dry_run_events(clock, "service.restart", &plan);
+        let events = dry_run_events(clock, action, &plan);
         Ok(PlanExecutionResult {
             plan,
-            message: format!("would restart service `{service_name}`"),
+            message: format!("would {} service `{service_name}`", action_label(action)),
             events,
         })
     } else {
@@ -387,7 +407,11 @@ fn restart_service_from_config(
         executor.execute(&plan)?;
         Ok(PlanExecutionResult {
             plan,
-            message: format!("restarted service `{service_name}`"),
+            message: match action {
+                ServiceAction::Start => format!("started service `{service_name}`"),
+                ServiceAction::Stop => format!("stopped service `{service_name}`"),
+                ServiceAction::Restart => format!("restarted service `{service_name}`"),
+            },
             events: Vec::new(),
         })
     }
@@ -399,32 +423,48 @@ struct PlanExecutionResult {
     events: Vec<OutputEvent>,
 }
 
-fn dry_run_events(clock: &dyn Clock, command: &str, plan: &Plan) -> Vec<OutputEvent> {
+fn dry_run_events(clock: &dyn Clock, action: ServiceAction, plan: &Plan) -> Vec<OutputEvent> {
     plan.operations
         .iter()
         .enumerate()
-        .map(|(index, operation)| dry_run_event(clock, command, index, operation))
+        .map(|(index, operation)| dry_run_event(clock, action, index, operation))
         .collect()
 }
 
 fn dry_run_event(
     clock: &dyn Clock,
-    command: &str,
+    action: ServiceAction,
     index: usize,
     operation: &Operation,
 ) -> OutputEvent {
     match operation {
-        Operation::RestartService { manager, unit } => OutputEvent {
+        Operation::StartLaunchdService { unit }
+        | Operation::StopLaunchdService { unit }
+        | Operation::RestartLaunchdService { unit } => OutputEvent {
             ts: clock.now_utc_rfc3339(),
             level: SeverityLevel::Info,
-            code: format!("{command}.preview"),
-            message: format!("{}. Would restart `{}` unit `{}`", index + 1, manager, unit),
+            code: format!("service.{}.preview", action_label(action)),
+            message: format!(
+                "{}. Would {} `launchd` unit `{}`",
+                index + 1,
+                action_label(action),
+                unit
+            ),
             details: json!({
                 "operation_index": index + 1,
-                "manager": manager,
+                "action": action_label(action),
+                "manager": "launchd",
                 "unit": unit,
             }),
         },
+    }
+}
+
+fn action_label(action: ServiceAction) -> &'static str {
+    match action {
+        ServiceAction::Start => "start",
+        ServiceAction::Stop => "stop",
+        ServiceAction::Restart => "restart",
     }
 }
 
@@ -451,10 +491,9 @@ mod tests {
         let clock = FixedClock::new("2026-03-12T10:00:00Z");
         let event = dry_run_event(
             &clock,
-            "service.restart",
+            ServiceAction::Restart,
             0,
-            &Operation::RestartService {
-                manager: "launchd".to_string(),
+            &Operation::RestartLaunchdService {
                 unit: "system/com.bitcoind.node".to_string(),
             },
         );
@@ -469,6 +508,7 @@ mod tests {
             event.details,
             json!({
                 "operation_index": 1,
+                "action": "restart",
                 "manager": "launchd",
                 "unit": "system/com.bitcoind.node",
             })

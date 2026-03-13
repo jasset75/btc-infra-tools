@@ -13,10 +13,20 @@ pub trait ServiceAdapter {
 pub struct LaunchdAdapter;
 
 impl LaunchdAdapter {
+    pub fn start_unit(&self, unit: &str) -> Result<()> {
+        self.run_launchctl(&["bootstrap", unit], unit, "start")
+    }
+
+    pub fn stop_unit(&self, unit: &str) -> Result<()> {
+        self.run_launchctl(&["bootout", unit], unit, "stop")
+    }
+
     pub fn restart_unit(&self, unit: &str) -> Result<()> {
-        let output = Command::new("launchctl")
-            .args(["kickstart", "-k", unit])
-            .output()?;
+        self.run_launchctl(&["kickstart", "-k", unit], unit, "restart")
+    }
+
+    fn run_launchctl(&self, args: &[&str], unit: &str, action: &str) -> Result<()> {
+        let output = Command::new("launchctl").args(args).output()?;
 
         if output.status.success() {
             return Ok(());
@@ -28,19 +38,19 @@ impl LaunchdAdapter {
 
         if stderr.contains("Unrecognized target specifier") {
             bail!(
-                "launchctl restart failed for unit {unit}: invalid target specifier. Use full launchctl target format '<domain>/<label>' (example: 'system/com.bitcoind.node'). Raw error: {stderr}"
+                "launchctl {action} failed for unit {unit}: invalid target specifier. Use full launchctl target format '<domain>/<label>' (example: 'system/com.bitcoind.node'). Raw error: {stderr}"
             );
         }
 
         if stderr.contains("Operation not permitted") {
             bail!(
-                "launchctl restart failed for unit {unit}: insufficient privileges. For system domain units, run belter with elevated permissions (example: 'sudo -E belter service restart ...'). Raw error: {stderr}"
+                "launchctl {action} failed for unit {unit}: insufficient privileges. For system domain units, run belter with elevated permissions (example: 'sudo -E belter service restart ...'). Raw error: {stderr}"
             );
         }
 
         bail!(
-            "launchctl restart failed for unit {unit} (status={:?}, stdout={stdout}, stderr={stderr})",
-            code
+            "launchctl {action} failed for unit {unit} (status={:?}, stdout={stdout}, stderr={stderr})",
+            code,
         )
     }
 }

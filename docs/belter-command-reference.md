@@ -129,22 +129,31 @@ belter
 ### `service start <name>`
 - Parameters:
   - `name` (required)
-- Behavior: scaffold echo response.
+- Behavior:
+  - Loads `service.<name>` from config.
+  - `launchd`: executes start against configured `unit`.
+  - `--dry-run`: emits preview events and serialized plan without executing commands.
+  - `--json`: returns machine-readable envelope including `plan` and `events`.
 
 ### `service stop <name>`
 - Parameters:
   - `name` (required)
-- Behavior: scaffold echo response.
+- Behavior:
+  - Loads `service.<name>` from config.
+  - `launchd`: executes stop against configured `unit`.
+  - `--dry-run`: emits preview events and serialized plan without executing commands.
+  - `--json`: returns machine-readable envelope including `plan` and `events`.
 
 ### `service restart <name>`
 - Parameters:
   - `name` (required)
 - Behavior:
   - Loads `service.<name>` from config.
-  - Requires `manager = "launchd"` and `unit`.
   - Expands `${ENV_VAR}` placeholders from environment.
-  - Runs `launchctl kickstart -k <unit>`.
+  - `launchd`: requires `unit` and runs `launchctl kickstart -k <unit>`.
   - If `.env` exists in current directory, it is autoloaded before command execution.
+  - `--dry-run`: emits preview events and serialized plan without executing commands.
+  - `--json`: returns machine-readable envelope including `plan` and `events`.
 - Operational notes:
   - For launchd units in `system/...`, restart may require elevation (`sudo -E`).
   - Unit must be full launchd target (`<domain>/<label>`, for example `system/com.bitcoind.node`).
