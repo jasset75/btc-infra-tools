@@ -53,8 +53,9 @@ project = "${MEMPOOL_PROJECT}"
     let stdout = String::from_utf8(output.stdout).expect("stdout should be utf8");
     assert!(stdout.contains("\"command\": \"service.start\""));
     assert!(stdout.contains("\"dry_run\": true"));
-    assert!(stdout.contains("\"manager\": \"podman_compose\""));
+    assert!(stdout.contains("\"events\": []"));
     assert!(stdout.contains("\"compose_file\": \"/tmp/base.yml\""));
+    assert!(!stdout.contains("service.start.preview"));
 
     fs::remove_dir_all(&fixture_dir).expect("fixture dir should be removed");
 }

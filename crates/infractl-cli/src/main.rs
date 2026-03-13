@@ -2,8 +2,8 @@ use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use infractl_core::config::{BelterConfig, DEFAULT_CONFIG_FILE, default_config_template};
 use infractl_core::env::{EnvResolver, ProcessEnvResolver};
-use infractl_core::output::{OutputEnvelope, OutputEvent, SeverityLevel};
-use infractl_core::plan::{ExecutionDetails, ExecutionReport, Operation, Plan};
+use infractl_core::output::{OutputEnvelope, OutputEvent};
+use infractl_core::plan::{ExecutionDetails, ExecutionReport, Plan};
 use infractl_core::time::{Clock, SystemClock};
 use infractl_core::usecase::{ServiceAction, ServiceCommandRequest};
 use serde_json::{Value, json};
@@ -286,7 +286,6 @@ fn run<C: Clock, E: EnvResolver, D: DotenvLoader, O: Write>(
                 cli.dry_run,
                 "service.start",
                 execute_service_command_from_config(
-                    &deps.clock,
                     &deps.env_resolver,
                     &cli.config,
                     name,
@@ -301,7 +300,6 @@ fn run<C: Clock, E: EnvResolver, D: DotenvLoader, O: Write>(
                 cli.dry_run,
                 "service.stop",
                 execute_service_command_from_config(
-                    &deps.clock,
                     &deps.env_resolver,
                     &cli.config,
                     name,
@@ -316,7 +314,6 @@ fn run<C: Clock, E: EnvResolver, D: DotenvLoader, O: Write>(
                 cli.dry_run,
                 "service.restart",
                 execute_service_command_from_config(
-                    &deps.clock,
                     &deps.env_resolver,
                     &cli.config,
                     name,
@@ -449,11 +446,15 @@ fn emit_plan<W: Write>(
             } else {
                 writeln!(stdout, "[{}] {}: {}", out.ts, out.command, out.message)?;
                 if dry_run {
-                    for event in &out.events {
-                        writeln!(stdout, "[DRY-RUN] {}", event.message)?;
-                    }
-                    writeln!(stdout, "[DRY-RUN] Plan payload structure:")?;
-                    writeln!(stdout, "{}", serde_json::to_string_pretty(&out.data)?)?;
+                    let report = json!({
+                        "command": out.command,
+                        "status": out.status,
+                        "message": out.message,
+                        "dry_run": out.dry_run,
+                        "data": out.data,
+                    });
+                    writeln!(stdout, "[DRY-RUN] Report:")?;
+                    writeln!(stdout, "{}", serde_json::to_string_pretty(&report)?)?;
                 }
             }
             Ok(())
@@ -513,7 +514,6 @@ fn init_config_file(path: &PathBuf, force: bool) -> Result<()> {
 }
 
 fn execute_service_command_from_config(
-    clock: &dyn Clock,
     env_resolver: &dyn EnvResolver,
     config_path: &PathBuf,
     service_name: &str,
@@ -538,12 +538,11 @@ fn execute_service_command_from_config(
     if dry_run {
         let mut executor = infractl_adapters::executor::DryRunExecutor::sink();
         executor.execute(&plan)?;
-        let events = dry_run_events(clock, action, &plan);
         Ok(PlanExecutionResult {
             plan,
             message: format!("would {} service `{service_name}`", action_label(action)),
             execution_report: Vec::new(),
-            events,
+            events: Vec::new(),
         })
     } else {
         let mut executor = infractl_adapters::executor::RealExecutor::new();
@@ -600,76 +599,6 @@ fn execution_message(
     base
 }
 
-fn dry_run_events(clock: &dyn Clock, action: ServiceAction, plan: &Plan) -> Vec<OutputEvent> {
-    plan.operations
-        .iter()
-        .enumerate()
-        .map(|(index, operation)| dry_run_event(clock, action, index, operation))
-        .collect()
-}
-
-fn dry_run_event(
-    clock: &dyn Clock,
-    action: ServiceAction,
-    index: usize,
-    operation: &Operation,
-) -> OutputEvent {
-    match operation {
-        Operation::StartLaunchdService { unit }
-        | Operation::StopLaunchdService { unit }
-        | Operation::RestartLaunchdService { unit } => OutputEvent {
-            ts: clock.now_utc_rfc3339(),
-            level: SeverityLevel::Info,
-            code: format!("service.{}.preview", action_label(action)),
-            message: format!(
-                "{}. Would {} `launchd` unit `{}`",
-                index + 1,
-                action_label(action),
-                unit
-            ),
-            details: json!({
-                "operation_index": index + 1,
-                "action": action_label(action),
-                "manager": "launchd",
-                "unit": unit,
-            }),
-        },
-        Operation::StartPodmanComposeService {
-            compose_file,
-            compose_override,
-            project,
-        }
-        | Operation::StopPodmanComposeService {
-            compose_file,
-            compose_override,
-            project,
-        }
-        | Operation::RestartPodmanComposeService {
-            compose_file,
-            compose_override,
-            project,
-        } => OutputEvent {
-            ts: clock.now_utc_rfc3339(),
-            level: SeverityLevel::Info,
-            code: format!("service.{}.preview", action_label(action)),
-            message: format!(
-                "{}. Would {} `podman_compose` project {:?}",
-                index + 1,
-                action_label(action),
-                project
-            ),
-            details: json!({
-                "operation_index": index + 1,
-                "action": action_label(action),
-                "manager": "podman_compose",
-                "compose_file": compose_file,
-                "compose_override": compose_override,
-                "project": project,
-            }),
-        },
-    }
-}
-
 fn action_label(action: ServiceAction) -> &'static str {
     match action {
         ServiceAction::Start => "start",
@@ -714,66 +643,6 @@ mod tests {
         assert!(!out.dry_run);
         assert_eq!(out.data, Value::Null);
         assert!(out.events.is_empty());
-    }
-
-    #[test]
-    fn dry_run_event_uses_stable_shape() {
-        let clock = FixedClock::new("2026-03-12T10:00:00Z");
-        let event = dry_run_event(
-            &clock,
-            ServiceAction::Restart,
-            0,
-            &Operation::RestartLaunchdService {
-                unit: "system/com.bitcoind.node".to_string(),
-            },
-        );
-        assert_eq!(event.ts, "2026-03-12T10:00:00Z");
-        assert_eq!(event.level, SeverityLevel::Info);
-        assert_eq!(event.code, "service.restart.preview");
-        assert_eq!(
-            event.message,
-            "1. Would restart `launchd` unit `system/com.bitcoind.node`"
-        );
-        assert_eq!(
-            event.details,
-            json!({
-                "operation_index": 1,
-                "action": "restart",
-                "manager": "launchd",
-                "unit": "system/com.bitcoind.node",
-            })
-        );
-    }
-
-    #[test]
-    fn dry_run_event_renders_podman_compose_shape() {
-        let clock = FixedClock::new("2026-03-12T10:00:00Z");
-        let event = dry_run_event(
-            &clock,
-            ServiceAction::Start,
-            0,
-            &Operation::StartPodmanComposeService {
-                compose_file: "/tmp/base.yml".to_string(),
-                compose_override: Some("/tmp/override.yml".to_string()),
-                project: Some("docker".to_string()),
-            },
-        );
-
-        assert_eq!(event.ts, "2026-03-12T10:00:00Z");
-        assert_eq!(event.level, SeverityLevel::Info);
-        assert_eq!(event.code, "service.start.preview");
-        assert_eq!(event.message, "1. Would start `podman_compose` project Some(\"docker\")");
-        assert_eq!(
-            event.details,
-            json!({
-                "operation_index": 1,
-                "action": "start",
-                "manager": "podman_compose",
-                "compose_file": "/tmp/base.yml",
-                "compose_override": "/tmp/override.yml",
-                "project": "docker",
-            })
-        );
     }
 
     #[test]
@@ -845,8 +714,9 @@ project = "${MEMPOOL_PROJECT}"
         let rendered = String::from_utf8(stdout).expect("stdout should be utf8");
         assert!(rendered.contains("\"command\": \"service.start\""));
         assert!(rendered.contains("\"dry_run\": true"));
-        assert!(rendered.contains("\"manager\": \"podman_compose\""));
+        assert!(rendered.contains("\"events\": []"));
         assert!(rendered.contains("\"compose_file\": \"/tmp/base.yml\""));
+        assert!(!rendered.contains("service.start.preview"));
 
         fs::remove_dir_all(&fixture_dir).expect("fixture dir should be removed");
     }
