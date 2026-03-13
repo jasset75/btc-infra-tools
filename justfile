@@ -1,0 +1,19 @@
+set shell := ["zsh", "-cu"]
+
+default:
+  @just --list
+
+build:
+  cargo build --workspace
+
+install:
+  cargo install --path crates/infractl-cli --locked --root ~/.local --force
+
+check:
+  cargo check --workspace
+
+clippy:
+  cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+test:
+  cargo test --all-targets

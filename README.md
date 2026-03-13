@@ -49,6 +49,16 @@ mise install
 
 mise exec -- cargo --version
 mise exec -- rustc --version
+mise exec -- just --version
+```
+
+Common day-to-day tasks:
+
+```bash
+mise exec -- just build
+mise exec -- just install
+mise exec -- just check
+mise exec -- just clippy
 ```
 
 Install `belter` binary for direct use (`belter <args>`):
@@ -115,9 +125,9 @@ Versioning policy:
 This repository uses `lefthook` to run local quality gates before push.
 
 Pre-push checks:
-1. `cargo check -p belter`
-2. `cargo clippy --all-targets --all-features -- -D warnings`
-3. `cargo test --all-targets`
+1. `just check`
+2. `just clippy`
+3. `just test`
 
 Setup:
 ```bash

@@ -2,12 +2,12 @@ pre-commit:
   parallel: false
   commands:
     check:
-      run: cargo check --workspace
+      run: mise exec -- just check
     clippy:
-      run: cargo clippy --all-targets --all-features -- -D warnings
+      run: mise exec -- just clippy
 
 pre-push:
   parallel: false
   commands:
     test:
-      run: cargo test --all-targets
+      run: mise exec -- just test
