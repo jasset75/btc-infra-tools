@@ -166,12 +166,14 @@ name = "infractl-adapters"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "infractl-core",
 ]
 
 [[package]]
 name = "infractl-core"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "serde",
  "time",
  "toml",

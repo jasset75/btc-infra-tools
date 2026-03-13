@@ -1,6 +1,8 @@
 use anyhow::{Result, bail};
 use std::process::Command;
 
+pub mod executor;
+
 pub trait ServiceAdapter {
     fn status(&self, _service: &str) -> Result<String>;
     fn start(&self, _service: &str) -> Result<()>;

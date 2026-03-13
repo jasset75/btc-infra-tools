@@ -4,6 +4,7 @@ Monorepo for `belter`, a Rust CLI/TUI for infrastructure operations.
 
 ## Initial Architecture
 - Design decisions and initial scope: [Architecture](docs/architecture.md)
+- Current implemented architecture (with runtime flow): [Architecture (Current)](docs/architecture-btc-infra-tools.md)
 - Feature and release history: [CHANGELOG](CHANGELOG.md)
 
 ## Workspace Layout
