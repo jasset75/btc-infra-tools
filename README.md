@@ -112,6 +112,26 @@ cargo run -p belter -- config init --force
 Generated URL example:
 - `http://${MEMPOOL_HOST}:${MEMPOOL_PORT}/api/v1/backend-info`
 
+Practical `.env` example for a local `mempool` stack:
+
+```bash
+MEMPOOL_HOST=127.0.0.1
+MEMPOOL_PORT=8080
+MEMPOOL_COMPOSE_FILE=$HOME/mempool-local/ops/mempool/config/docker-compose.base.yml
+MEMPOOL_COMPOSE_OVERRIDE=$HOME/mempool-local/ops/mempool/config/docker-compose.override.yml
+MEMPOOL_PROJECT=docker
+```
+
+Placeholder notes for `.env.example`:
+- `<mempool_host>`: host where belter reaches the local mempool HTTP API, usually `127.0.0.1`.
+- `<mempool_port>`: published mempool web/API port, usually `8080`.
+- `<path_to_mempool_compose_file>`: absolute path to the base compose file copied from upstream.
+- `<path_to_mempool_compose_override_file>`: absolute path to the local override compose file.
+- `<podman_compose_project_name>`: compose project name passed as `podman compose -p ...`; current recommended value is `docker`.
+- `<path_to_bitcoind_workdir>`: host working directory for the managed Bitcoin Core service, if used.
+- `<path_to_bitcoind_datadir>`: host datadir passed to `bitcoin-cli`, if used.
+- `<launchd_unit_for_bitcoind>`: full launchd target, for example `system/com.bitcoind.node`.
+
 ## Development Cycle
 Feature delivery follows this loop:
 1. Develop feature.
