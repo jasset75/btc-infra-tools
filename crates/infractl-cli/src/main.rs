@@ -8,6 +8,7 @@ use infractl_core::time::{Clock, SystemClock};
 use infractl_core::usecase::{ServiceAction, ServiceCommandRequest};
 use serde_json::{Value, json};
 use std::fs;
+use std::io::{self, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -155,8 +156,19 @@ fn main() -> ExitCode {
         clock: SystemClock,
         env_resolver: ProcessEnvResolver,
     };
+    let mut stdout = io::stdout();
+    let mut stderr = io::stderr();
 
-    match run(&deps, &cli) {
+    run_cli(&deps, &cli, &mut stdout, &mut stderr)
+}
+
+fn run_cli<C: Clock, E: EnvResolver, O: Write, Er: Write>(
+    deps: &RuntimeDeps<C, E>,
+    cli: &Cli,
+    stdout: &mut O,
+    stderr: &mut Er,
+) -> ExitCode {
+    match run(deps, cli, stdout) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             if cli.json {
@@ -167,13 +179,18 @@ fn main() -> ExitCode {
                     cli.dry_run,
                 );
                 match serde_json::to_string_pretty(&out) {
-                    Ok(serialized) => println!("{serialized}"),
-                    Err(json_error) => eprintln!(
-                        "Error: failed to serialize JSON error output: {json_error}"
-                    ),
+                    Ok(serialized) => {
+                        let _ = writeln!(stdout, "{serialized}");
+                    }
+                    Err(json_error) => {
+                        let _ = writeln!(
+                            stderr,
+                            "Error: failed to serialize JSON error output: {json_error}"
+                        );
+                    }
                 }
             } else {
-                eprintln!("Error: {error}");
+                let _ = writeln!(stderr, "Error: {error}");
             }
 
             ExitCode::from(1)
@@ -181,7 +198,11 @@ fn main() -> ExitCode {
     }
 }
 
-fn run<C: Clock, E: EnvResolver>(deps: &RuntimeDeps<C, E>, cli: &Cli) -> Result<()> {
+fn run<C: Clock, E: EnvResolver, O: Write>(
+    deps: &RuntimeDeps<C, E>,
+    cli: &Cli,
+    stdout: &mut O,
+) -> Result<()> {
     load_dotenv_if_present()?;
     match &cli.command {
         Command::Config { command } => match command {
@@ -192,6 +213,7 @@ fn run<C: Clock, E: EnvResolver>(deps: &RuntimeDeps<C, E>, cli: &Cli) -> Result<
                 init_config_file(&target, *force)?;
                 emit(
                     &deps.clock,
+                    stdout,
                     cli.json,
                     "config.init",
                     &format!("created configuration file at {}", target.display()),
@@ -199,12 +221,14 @@ fn run<C: Clock, E: EnvResolver>(deps: &RuntimeDeps<C, E>, cli: &Cli) -> Result<
             }
             ConfigCommand::Validate => emit(
                 &deps.clock,
+                stdout,
                 cli.json,
                 "config.validate",
                 "configuration is valid",
             ),
             ConfigCommand::Show => emit(
                 &deps.clock,
+                stdout,
                 cli.json,
                 "config.show",
                 "showing effective configuration",
@@ -213,6 +237,7 @@ fn run<C: Clock, E: EnvResolver>(deps: &RuntimeDeps<C, E>, cli: &Cli) -> Result<
         Command::Service { command } => match command {
             ServiceCommand::List => emit(
                 &deps.clock,
+                stdout,
                 cli.json,
                 "service.list",
                 "configured services: bitcoind, stratum, mempool",
@@ -221,6 +246,7 @@ fn run<C: Clock, E: EnvResolver>(deps: &RuntimeDeps<C, E>, cli: &Cli) -> Result<
                 let service = name.clone().unwrap_or_else(|| "all".to_string());
                 emit(
                     &deps.clock,
+                    stdout,
                     cli.json,
                     "service.status",
                     &format!("status target={service} ui={:?}", ui.effective()),
@@ -228,6 +254,7 @@ fn run<C: Clock, E: EnvResolver>(deps: &RuntimeDeps<C, E>, cli: &Cli) -> Result<
             }
             ServiceCommand::Start { name } => emit_plan(
                 &deps.clock,
+                stdout,
                 cli.json,
                 cli.dry_run,
                 "service.start",
@@ -242,6 +269,7 @@ fn run<C: Clock, E: EnvResolver>(deps: &RuntimeDeps<C, E>, cli: &Cli) -> Result<
             ),
             ServiceCommand::Stop { name } => emit_plan(
                 &deps.clock,
+                stdout,
                 cli.json,
                 cli.dry_run,
                 "service.stop",
@@ -256,6 +284,7 @@ fn run<C: Clock, E: EnvResolver>(deps: &RuntimeDeps<C, E>, cli: &Cli) -> Result<
             ),
             ServiceCommand::Restart { name } => emit_plan(
                 &deps.clock,
+                stdout,
                 cli.json,
                 cli.dry_run,
                 "service.restart",
@@ -270,6 +299,7 @@ fn run<C: Clock, E: EnvResolver>(deps: &RuntimeDeps<C, E>, cli: &Cli) -> Result<
             ),
             ServiceCommand::Logs { name, follow } => emit(
                 &deps.clock,
+                stdout,
                 cli.json,
                 "service.logs",
                 &format!("logs target={name} follow={follow}"),
@@ -278,12 +308,14 @@ fn run<C: Clock, E: EnvResolver>(deps: &RuntimeDeps<C, E>, cli: &Cli) -> Result<
         Command::Health { command } => match command {
             HealthCommand::Check { all, id, ui } => emit(
                 &deps.clock,
+                stdout,
                 cli.json,
                 "health.check",
                 &format!("check all={all} id={id:?} ui={:?}", ui.effective()),
             ),
             HealthCommand::Snapshot => emit(
                 &deps.clock,
+                stdout,
                 cli.json,
                 "health.snapshot",
                 "snapshot generated",
@@ -291,12 +323,24 @@ fn run<C: Clock, E: EnvResolver>(deps: &RuntimeDeps<C, E>, cli: &Cli) -> Result<
         },
         Command::Run { command } => match command {
             RunCommand::Action { id } => {
-                emit(&deps.clock, cli.json, "run.action", &format!("action={id}"))
+                emit(
+                    &deps.clock,
+                    stdout,
+                    cli.json,
+                    "run.action",
+                    &format!("action={id}"),
+                )
             }
         },
         Command::Tui { command } => match command {
             TuiCommand::Dashboard => {
-                emit(&deps.clock, cli.json, "tui.dashboard", "starting dashboard")
+                emit(
+                    &deps.clock,
+                    stdout,
+                    cli.json,
+                    "tui.dashboard",
+                    "starting dashboard",
+                )
             }
         },
     }
@@ -313,13 +357,19 @@ fn load_dotenv_if_present() -> Result<()> {
     Ok(())
 }
 
-fn emit(clock: &dyn Clock, json: bool, command: &str, message: &str) -> Result<()> {
+fn emit<W: Write>(
+    clock: &dyn Clock,
+    stdout: &mut W,
+    json: bool,
+    command: &str,
+    message: &str,
+) -> Result<()> {
     let out = output_envelope(clock, command, "ok", message, false, Value::Null, Vec::new());
 
     if json {
-        println!("{}", serde_json::to_string_pretty(&out)?);
+        writeln!(stdout, "{}", serde_json::to_string_pretty(&out)?)?;
     } else {
-        println!("[{}] {}: {}", out.ts, out.command, out.message);
+        writeln!(stdout, "[{}] {}: {}", out.ts, out.command, out.message)?;
     }
     Ok(())
 }
@@ -356,8 +406,9 @@ fn error_envelope(clock: &dyn Clock, command: &str, message: &str, dry_run: bool
     )
 }
 
-fn emit_plan(
+fn emit_plan<W: Write>(
     clock: &dyn Clock,
+    stdout: &mut W,
     json: bool,
     dry_run: bool,
     command: &str,
@@ -378,15 +429,15 @@ fn emit_plan(
                 plan_result.events,
             );
             if json {
-                println!("{}", serde_json::to_string_pretty(&out)?);
+                writeln!(stdout, "{}", serde_json::to_string_pretty(&out)?)?;
             } else {
-                println!("[{}] {}: {}", out.ts, out.command, out.message);
+                writeln!(stdout, "[{}] {}: {}", out.ts, out.command, out.message)?;
                 if dry_run {
                     for event in &out.events {
-                        println!("[DRY-RUN] {}", event.message);
+                        writeln!(stdout, "[DRY-RUN] {}", event.message)?;
                     }
-                    println!("[DRY-RUN] Plan payload structure:");
-                    println!("{}", serde_json::to_string_pretty(&out.data)?);
+                    writeln!(stdout, "[DRY-RUN] Plan payload structure:")?;
+                    writeln!(stdout, "{}", serde_json::to_string_pretty(&out.data)?)?;
                 }
             }
             Ok(())
@@ -614,7 +665,11 @@ fn action_label(action: ServiceAction) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use infractl_core::env::FixedEnvResolver;
     use infractl_core::time::FixedClock;
+    use std::collections::HashMap;
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn output_envelope_uses_injected_fixed_clock() {
@@ -695,5 +750,130 @@ mod tests {
                 "project": "docker",
             })
         );
+    }
+
+    #[test]
+    fn run_renders_dry_run_service_list() {
+        let clock = FixedClock::new("2026-03-12T10:00:00Z");
+        let deps = RuntimeDeps {
+            clock,
+            env_resolver: FixedEnvResolver::new(HashMap::new()),
+        };
+        let cli = Cli::parse_from(["belter", "--dry-run", "service", "list"]);
+        let mut stdout = Vec::new();
+
+        run(&deps, &cli, &mut stdout).expect("run should succeed");
+
+        let rendered = String::from_utf8(stdout).expect("stdout should be utf8");
+        assert!(rendered.contains("[2026-03-12T10:00:00Z] service.list"));
+        assert!(rendered.contains("configured services: bitcoind, stratum, mempool"));
+    }
+
+    #[test]
+    fn run_renders_json_dry_run_plan() {
+        let fixture_dir = unique_fixture_dir();
+        fs::create_dir_all(&fixture_dir).expect("fixture dir should be created");
+
+        let config_path = fixture_dir.join("belter.toml");
+        fs::write(
+            &config_path,
+            r#"
+[service.mempool]
+manager = "podman_compose"
+compose_file = "${MEMPOOL_COMPOSE_FILE}"
+compose_override = "${MEMPOOL_COMPOSE_OVERRIDE}"
+project = "${MEMPOOL_PROJECT}"
+"#,
+        )
+        .expect("config should be written");
+
+        let clock = FixedClock::new("2026-03-12T10:00:00Z");
+        let deps = RuntimeDeps {
+            clock,
+            env_resolver: FixedEnvResolver::new(HashMap::from([
+                (
+                    "MEMPOOL_COMPOSE_FILE".to_string(),
+                    "/tmp/base.yml".to_string(),
+                ),
+                (
+                    "MEMPOOL_COMPOSE_OVERRIDE".to_string(),
+                    "/tmp/override.yml".to_string(),
+                ),
+                ("MEMPOOL_PROJECT".to_string(), "docker".to_string()),
+            ])),
+        };
+        let cli = Cli::parse_from([
+            "belter",
+            "--config",
+            config_path.to_str().expect("utf8 path"),
+            "--dry-run",
+            "--json",
+            "service",
+            "start",
+            "mempool",
+        ]);
+        let mut stdout = Vec::new();
+
+        run(&deps, &cli, &mut stdout).expect("run should succeed");
+
+        let rendered = String::from_utf8(stdout).expect("stdout should be utf8");
+        assert!(rendered.contains("\"command\": \"service.start\""));
+        assert!(rendered.contains("\"dry_run\": true"));
+        assert!(rendered.contains("\"manager\": \"podman_compose\""));
+        assert!(rendered.contains("\"compose_file\": \"/tmp/base.yml\""));
+
+        fs::remove_dir_all(&fixture_dir).expect("fixture dir should be removed");
+    }
+
+    #[test]
+    fn run_cli_renders_json_errors_to_stdout() {
+        let fixture_dir = unique_fixture_dir();
+        fs::create_dir_all(&fixture_dir).expect("fixture dir should be created");
+
+        let config_path = fixture_dir.join("belter.toml");
+        fs::write(
+            &config_path,
+            r#"
+[service.bitcoind]
+manager = "launchd"
+"#,
+        )
+        .expect("config should be written");
+
+        let clock = FixedClock::new("2026-03-12T10:00:00Z");
+        let deps = RuntimeDeps {
+            clock,
+            env_resolver: FixedEnvResolver::new(HashMap::new()),
+        };
+        let cli = Cli::parse_from([
+            "belter",
+            "--config",
+            config_path.to_str().expect("utf8 path"),
+            "--json",
+            "service",
+            "restart",
+            "bitcoind",
+        ]);
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        let exit = run_cli(&deps, &cli, &mut stdout, &mut stderr);
+
+        assert_eq!(exit, ExitCode::from(1));
+        let rendered = String::from_utf8(stdout).expect("stdout should be utf8");
+        assert!(rendered.contains("\"command\": \"service.restart\""));
+        assert!(rendered.contains("\"status\": \"error\""));
+        assert!(rendered.contains("service `bitcoind` is missing `unit`"));
+        assert!(stderr.is_empty());
+
+        fs::remove_dir_all(&fixture_dir).expect("fixture dir should be removed");
+    }
+
+    fn unique_fixture_dir() -> PathBuf {
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be monotonic")
+            .as_nanos();
+        std::env::temp_dir().join(format!("belter-cli-test-{ts}"))
     }
 }
