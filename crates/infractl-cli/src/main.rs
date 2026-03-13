@@ -3,7 +3,7 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use infractl_core::config::{BelterConfig, DEFAULT_CONFIG_FILE, default_config_template};
 use infractl_core::env::{EnvResolver, ProcessEnvResolver};
 use infractl_core::output::{OutputEnvelope, OutputEvent, SeverityLevel};
-use infractl_core::plan::{Operation, Plan};
+use infractl_core::plan::{ExecutionDetails, ExecutionReport, Operation, Plan};
 use infractl_core::time::{Clock, SystemClock};
 use infractl_core::usecase::{ServiceAction, ServiceCommandRequest};
 use serde_json::{Value, json};
@@ -327,7 +327,10 @@ fn emit_plan(
                 command,
                 &plan_result.message,
                 dry_run,
-                json!({ "plan": plan_result.plan }),
+                json!({
+                    "plan": plan_result.plan,
+                    "execution_report": plan_result.execution_report,
+                }),
                 plan_result.events,
             );
             if json {
@@ -400,18 +403,16 @@ fn execute_service_command_from_config(
         Ok(PlanExecutionResult {
             plan,
             message: format!("would {} service `{service_name}`", action_label(action)),
+            execution_report: Vec::new(),
             events,
         })
     } else {
         let mut executor = infractl_adapters::executor::RealExecutor::new();
-        executor.execute(&plan)?;
+        let execution_report = executor.execute(&plan)?;
         Ok(PlanExecutionResult {
             plan,
-            message: match action {
-                ServiceAction::Start => format!("started service `{service_name}`"),
-                ServiceAction::Stop => format!("stopped service `{service_name}`"),
-                ServiceAction::Restart => format!("restarted service `{service_name}`"),
-            },
+            message: execution_message(service_name, action, &execution_report),
+            execution_report,
             events: Vec::new(),
         })
     }
@@ -420,7 +421,44 @@ fn execute_service_command_from_config(
 struct PlanExecutionResult {
     plan: Plan,
     message: String,
+    execution_report: Vec<ExecutionReport>,
     events: Vec<OutputEvent>,
+}
+
+fn execution_message(
+    service_name: &str,
+    action: ServiceAction,
+    execution_report: &[ExecutionReport],
+) -> String {
+    let base = match action {
+        ServiceAction::Start => format!("started service `{service_name}`"),
+        ServiceAction::Stop => format!("stopped service `{service_name}`"),
+        ServiceAction::Restart => format!("restart requested for service `{service_name}`"),
+    };
+
+    if let Some((pid_before, pid_after)) = execution_report.iter().map(|report| {
+        match &report.details {
+            ExecutionDetails::LaunchdRestartPidChange {
+                pid_before,
+                pid_after,
+                ..
+            } => (*pid_before, *pid_after),
+        }
+    }).next() {
+        let restart_observed = matches!((pid_before, pid_after), (Some(before), Some(after)) if before != after);
+        return format!(
+            "{base} (restart observed: {}, pid before: {}, pid after: {})",
+            if restart_observed { "yes" } else { "no" },
+            pid_before
+                .map(|pid| pid.to_string())
+                .unwrap_or_else(|| "unknown".to_string()),
+            pid_after
+                .map(|pid| pid.to_string())
+                .unwrap_or_else(|| "unknown".to_string())
+        );
+    }
+
+    base
 }
 
 fn dry_run_events(clock: &dyn Clock, action: ServiceAction, plan: &Plan) -> Vec<OutputEvent> {

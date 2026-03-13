@@ -1,5 +1,5 @@
 use crate::{LaunchdAdapter, PodmanComposeAdapter};
-use infractl_core::plan::{Executor, Operation, Plan};
+use infractl_core::plan::{ExecutionReport, Executor, Operation, Plan};
 use std::io::Write;
 
 pub struct RealExecutor {
@@ -23,12 +23,19 @@ impl Default for RealExecutor {
 }
 
 impl Executor for RealExecutor {
-    fn execute(&mut self, plan: &Plan) -> anyhow::Result<()> {
-        for op in &plan.operations {
+    fn execute(&mut self, plan: &Plan) -> anyhow::Result<Vec<ExecutionReport>> {
+        let mut reports = Vec::new();
+
+        for (index, op) in plan.operations.iter().enumerate() {
             match op {
                 Operation::StartLaunchdService { unit } => self.launchd.start_unit(unit)?,
                 Operation::StopLaunchdService { unit } => self.launchd.stop_unit(unit)?,
-                Operation::RestartLaunchdService { unit } => self.launchd.restart_unit(unit)?,
+                Operation::RestartLaunchdService { unit } => {
+                    reports.push(ExecutionReport {
+                        operation_index: index + 1,
+                        details: self.launchd.restart_unit(unit)?,
+                    });
+                }
                 Operation::StartPodmanComposeService {
                     compose_file,
                     compose_override,
@@ -58,7 +65,7 @@ impl Executor for RealExecutor {
                 )?,
             }
         }
-        Ok(())
+        Ok(reports)
     }
 }
 
@@ -85,7 +92,7 @@ impl DryRunExecutor<std::io::Sink> {
 }
 
 impl<W: Write> Executor for DryRunExecutor<W> {
-    fn execute(&mut self, plan: &Plan) -> anyhow::Result<()> {
+    fn execute(&mut self, plan: &Plan) -> anyhow::Result<Vec<ExecutionReport>> {
         for (i, op) in plan.operations.iter().enumerate() {
             match op {
                 Operation::StartLaunchdService { unit } => writeln!(
@@ -144,7 +151,7 @@ impl<W: Write> Executor for DryRunExecutor<W> {
                 )?,
             }
         }
-        Ok(())
+        Ok(Vec::new())
     }
 }
 
