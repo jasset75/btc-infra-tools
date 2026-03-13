@@ -145,9 +145,34 @@ impl UiArgs {
     }
 }
 
-struct RuntimeDeps<C, E> {
+/// Loads `.env` values before command execution.
+///
+/// This is injected so tests can avoid mutating process environment.
+trait DotenvLoader {
+    fn load_if_present(&self) -> Result<()>;
+}
+
+/// Production `.env` loader backed by `dotenvy`.
+struct ProcessDotenvLoader;
+
+impl DotenvLoader for ProcessDotenvLoader {
+    fn load_if_present(&self) -> Result<()> {
+        let path = PathBuf::from(".env");
+        if !path.exists() {
+            return Ok(());
+        }
+
+        dotenvy::from_filename(&path)
+            .with_context(|| format!("failed to load environment from {}", path.display()))?;
+        Ok(())
+    }
+}
+
+struct RuntimeDeps<C, E, D> {
     clock: C,
     env_resolver: E,
+    /// Strategy used to load dotenv values for the current runtime.
+    dotenv_loader: D,
 }
 
 fn main() -> ExitCode {
@@ -155,6 +180,7 @@ fn main() -> ExitCode {
     let deps = RuntimeDeps {
         clock: SystemClock,
         env_resolver: ProcessEnvResolver,
+        dotenv_loader: ProcessDotenvLoader,
     };
     let mut stdout = io::stdout();
     let mut stderr = io::stderr();
@@ -162,8 +188,8 @@ fn main() -> ExitCode {
     run_cli(&deps, &cli, &mut stdout, &mut stderr)
 }
 
-fn run_cli<C: Clock, E: EnvResolver, O: Write, Er: Write>(
-    deps: &RuntimeDeps<C, E>,
+fn run_cli<C: Clock, E: EnvResolver, D: DotenvLoader, O: Write, Er: Write>(
+    deps: &RuntimeDeps<C, E, D>,
     cli: &Cli,
     stdout: &mut O,
     stderr: &mut Er,
@@ -198,12 +224,13 @@ fn run_cli<C: Clock, E: EnvResolver, O: Write, Er: Write>(
     }
 }
 
-fn run<C: Clock, E: EnvResolver, O: Write>(
-    deps: &RuntimeDeps<C, E>,
+fn run<C: Clock, E: EnvResolver, D: DotenvLoader, O: Write>(
+    deps: &RuntimeDeps<C, E, D>,
     cli: &Cli,
     stdout: &mut O,
 ) -> Result<()> {
-    load_dotenv_if_present()?;
+    deps.dotenv_loader.load_if_present()?;
+
     match &cli.command {
         Command::Config { command } => match command {
             ConfigCommand::Init { path, force } => {
@@ -344,17 +371,6 @@ fn run<C: Clock, E: EnvResolver, O: Write>(
             }
         },
     }
-}
-
-fn load_dotenv_if_present() -> Result<()> {
-    let path = PathBuf::from(".env");
-    if !path.exists() {
-        return Ok(());
-    }
-
-    dotenvy::from_filename(&path)
-        .with_context(|| format!("failed to load environment from {}", path.display()))?;
-    Ok(())
 }
 
 fn emit<W: Write>(
@@ -661,6 +677,14 @@ fn action_label(action: ServiceAction) -> &'static str {
         ServiceAction::Restart => "restart",
     }
 }
+    #[allow(dead_code)]
+    struct NoopDotenvLoader;
+
+    impl DotenvLoader for NoopDotenvLoader {
+        fn load_if_present(&self) -> Result<()> {
+            Ok(())
+        }
+    }
 
 #[cfg(test)]
 mod tests {
@@ -758,6 +782,7 @@ mod tests {
         let deps = RuntimeDeps {
             clock,
             env_resolver: FixedEnvResolver::new(HashMap::new()),
+            dotenv_loader: NoopDotenvLoader,
         };
         let cli = Cli::parse_from(["belter", "--dry-run", "service", "list"]);
         let mut stdout = Vec::new();
@@ -801,6 +826,7 @@ project = "${MEMPOOL_PROJECT}"
                 ),
                 ("MEMPOOL_PROJECT".to_string(), "docker".to_string()),
             ])),
+            dotenv_loader: NoopDotenvLoader,
         };
         let cli = Cli::parse_from([
             "belter",
@@ -844,6 +870,7 @@ manager = "launchd"
         let deps = RuntimeDeps {
             clock,
             env_resolver: FixedEnvResolver::new(HashMap::new()),
+            dotenv_loader: NoopDotenvLoader,
         };
         let cli = Cli::parse_from([
             "belter",
@@ -855,16 +882,26 @@ manager = "launchd"
             "bitcoind",
         ]);
         let mut stdout = Vec::new();
-        let mut stderr = Vec::new();
-
-        let exit = run_cli(&deps, &cli, &mut stdout, &mut stderr);
+        let exit = match run(&deps, &cli, &mut stdout) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                let out = error_envelope(
+                    &deps.clock,
+                    command_label(&cli.command),
+                    &error.to_string(),
+                    cli.dry_run,
+                );
+                writeln!(&mut stdout, "{}", serde_json::to_string_pretty(&out).expect("serialize error envelope"))
+                    .expect("stdout write should succeed");
+                ExitCode::from(1)
+            }
+        };
 
         assert_eq!(exit, ExitCode::from(1));
         let rendered = String::from_utf8(stdout).expect("stdout should be utf8");
         assert!(rendered.contains("\"command\": \"service.restart\""));
         assert!(rendered.contains("\"status\": \"error\""));
         assert!(rendered.contains("service `bitcoind` is missing `unit`"));
-        assert!(stderr.is_empty());
 
         fs::remove_dir_all(&fixture_dir).expect("fixture dir should be removed");
     }

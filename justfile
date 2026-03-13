@@ -8,6 +8,7 @@ build:
 
 install:
   cargo install --path crates/infractl-cli --locked --root ~/.local --force
+  ~/.local/bin/belter --version
 
 check:
   cargo check --workspace

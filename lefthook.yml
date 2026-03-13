@@ -10,4 +10,4 @@ pre-push:
   parallel: false
   commands:
     test:
-      run: mise exec -- just test
+      run: mise exec -- env CARGO_TARGET_DIR=target/lefthook-prepush just test
