@@ -21,9 +21,19 @@ The project follows semantic versioning.
 - Added `lefthook` pre-push configuration to enforce local `check`, `clippy`, and `test` gates.
 - Added `.mise.toml` with `lefthook` tool pin so hook tooling is installable in remote/reproducible environments.
 - Added automatic `.env` loading at CLI startup when `.env` exists in the current working directory.
+- Added support for `manager = "podman_compose"` service lifecycle actions (`start`, `stop`, `restart`) with optional `compose_override` and `project`.
 - Improved launchd restart error UX with actionable guidance for:
   - invalid target format (requires `<domain>/<label>`, for example `system/com.bitcoind.node`)
   - insufficient privileges for `system/...` units (use elevated execution)
+- Added structured JSON error envelope output for CLI failures and explicit non-zero process exit code handling.
+- Added `just install` smoke check (`belter --version`) to fail fast if the installed binary is not executable in the current environment.
+- Added CLI integration test suite (`crates/infractl-cli/tests/cli_test.rs`) using `CARGO_BIN_EXE_belter` to validate dry-run and JSON error envelope flows without nested `cargo run`.
+- Added `just` as the project task runner with recipes for `build`, `install`, `check`, `clippy`, `clippy-fix`, and `test`.
+
+### Changed
+- Refactored CLI dotenv bootstrap to dependency injection (`DotenvLoader`) so tests can run without mutating process environment.
+- Updated `lefthook` pre-push test command to use an isolated cargo target directory (`CARGO_TARGET_DIR=target/lefthook-prepush`) to reduce build lock contention.
+- Updated default local example configuration and docs to include mempool placeholders (`MEMPOOL_COMPOSE_FILE`, `MEMPOOL_COMPOSE_OVERRIDE`, `MEMPOOL_PROJECT`) and a practical `.env` sample.
 
 ## [0.1.0] - 2026-03-10
 
