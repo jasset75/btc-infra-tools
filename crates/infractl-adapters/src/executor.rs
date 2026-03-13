@@ -9,7 +9,15 @@ pub struct RealExecutor {
 
 impl RealExecutor {
     pub fn new() -> Self {
-        Self { launchd: LaunchdAdapter }
+        Self {
+            launchd: LaunchdAdapter,
+        }
+    }
+}
+
+impl Default for RealExecutor {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -19,10 +27,8 @@ impl Executor for RealExecutor {
             match op {
                 Operation::RestartService { manager, unit } => match manager.as_str() {
                     "launchd" => self.launchd.restart_unit(unit)?,
-                    _ => bail!(
-                        "restart manager `{manager}` is not implemented by this executor"
-                    ),
-                }
+                    _ => bail!("restart manager `{manager}` is not implemented by this executor"),
+                },
             }
         }
         Ok(())
@@ -42,6 +48,12 @@ impl<W: Write> DryRunExecutor<W> {
 impl DryRunExecutor<std::io::Stdout> {
     pub fn stdout() -> Self {
         Self::new(std::io::stdout())
+    }
+}
+
+impl DryRunExecutor<std::io::Sink> {
+    pub fn sink() -> Self {
+        Self::new(std::io::sink())
     }
 }
 
@@ -79,7 +91,9 @@ mod tests {
             }],
         };
 
-        executor.execute(&plan).expect("dry-run execution should succeed");
+        executor
+            .execute(&plan)
+            .expect("dry-run execution should succeed");
 
         let rendered = String::from_utf8(output).expect("writer should contain utf8");
         assert!(rendered.contains("Would restart `launchd` unit `system/com.bitcoind.node`"));
@@ -96,8 +110,9 @@ mod tests {
         };
 
         let err = executor.execute(&plan).unwrap_err();
-        assert!(err
-            .to_string()
-            .contains("restart manager `systemd` is not implemented by this executor"));
+        assert!(
+            err.to_string()
+                .contains("restart manager `systemd` is not implemented by this executor")
+        );
     }
 }

@@ -1,7 +1,7 @@
-use anyhow::{bail, Result};
 use crate::config::BelterConfig;
 use crate::env::{EnvResolver, expand_placeholders};
 use crate::plan::{Operation, Plan};
+use anyhow::{Result, bail};
 
 pub struct RestartServiceRequest<'a> {
     pub config: &'a BelterConfig,
@@ -10,14 +10,15 @@ pub struct RestartServiceRequest<'a> {
 
 impl<'a> RestartServiceRequest<'a> {
     pub fn plan(&self, resolver: &dyn EnvResolver) -> Result<Plan> {
-        let services = self.config
+        let services = self
+            .config
             .service
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("missing [service] section"))?;
-            
-        let service = services
-            .get(self.service_name)
-            .ok_or_else(|| anyhow::anyhow!("service `{}` not found in config", self.service_name))?;
+
+        let service = services.get(self.service_name).ok_or_else(|| {
+            anyhow::anyhow!("service `{}` not found in config", self.service_name)
+        })?;
 
         if service.manager.trim().is_empty() {
             bail!("service `{}` has an empty `manager`", self.service_name);
@@ -27,7 +28,7 @@ impl<'a> RestartServiceRequest<'a> {
             .unit
             .as_deref()
             .ok_or_else(|| anyhow::anyhow!("service `{}` is missing `unit`", self.service_name))?;
-            
+
         let resolved_unit = expand_placeholders(unit, resolver)?;
 
         Ok(Plan {
@@ -49,10 +50,13 @@ mod tests {
     #[test]
     fn test_restart_service_request_plan() {
         let mut services = HashMap::new();
-        services.insert("bitcoind".to_string(), ServiceConfig {
-            manager: "launchd".to_string(),
-            unit: Some("system/com.bitcoind.node".to_string()),
-        });
+        services.insert(
+            "bitcoind".to_string(),
+            ServiceConfig {
+                manager: "launchd".to_string(),
+                unit: Some("system/com.bitcoind.node".to_string()),
+            },
+        );
         let config = BelterConfig {
             service: Some(services),
         };
@@ -78,10 +82,13 @@ mod tests {
     #[test]
     fn test_restart_service_request_rejects_empty_manager() {
         let mut services = HashMap::new();
-        services.insert("bitcoind".to_string(), ServiceConfig {
-            manager: " ".to_string(),
-            unit: Some("system/com.bitcoind.node".to_string()),
-        });
+        services.insert(
+            "bitcoind".to_string(),
+            ServiceConfig {
+                manager: " ".to_string(),
+                unit: Some("system/com.bitcoind.node".to_string()),
+            },
+        );
         let config = BelterConfig {
             service: Some(services),
         };
@@ -121,16 +128,22 @@ mod tests {
 
         let resolver = FixedEnvResolver::new(HashMap::new());
         let err = req.plan(&resolver).unwrap_err();
-        assert!(err.to_string().contains("service `bitcoind` not found in config"));
+        assert!(
+            err.to_string()
+                .contains("service `bitcoind` not found in config")
+        );
     }
 
     #[test]
     fn test_restart_service_request_rejects_missing_unit() {
         let mut services = HashMap::new();
-        services.insert("bitcoind".to_string(), ServiceConfig {
-            manager: "launchd".to_string(),
-            unit: None,
-        });
+        services.insert(
+            "bitcoind".to_string(),
+            ServiceConfig {
+                manager: "launchd".to_string(),
+                unit: None,
+            },
+        );
         let config = BelterConfig {
             service: Some(services),
         };
@@ -142,6 +155,9 @@ mod tests {
 
         let resolver = FixedEnvResolver::new(HashMap::new());
         let err = req.plan(&resolver).unwrap_err();
-        assert!(err.to_string().contains("service `bitcoind` is missing `unit`"));
+        assert!(
+            err.to_string()
+                .contains("service `bitcoind` is missing `unit`")
+        );
     }
 }

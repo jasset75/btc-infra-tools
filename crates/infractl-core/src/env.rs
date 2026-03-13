@@ -88,9 +88,11 @@ fn expand_placeholders_impl(
                 bail!("empty placeholder key in `{input}`");
             }
 
-            let value = resolve(key).or_else(|| default.map(ToOwned::to_owned)).ok_or_else(|| {
-                anyhow::anyhow!("missing environment variable `{key}` for `{input}`")
-            })?;
+            let value = resolve(key)
+                .or_else(|| default.map(ToOwned::to_owned))
+                .ok_or_else(|| {
+                    anyhow::anyhow!("missing environment variable `{key}` for `{input}`")
+                })?;
 
             out.push_str(&value);
             i = end_expr + 1;
@@ -122,7 +124,10 @@ mod tests {
     fn test_expand_env_missing() {
         let resolver = FixedEnvResolver::new(HashMap::new());
         let err = expand_placeholders("${MISSING_VAR_XYZ}", &resolver).unwrap_err();
-        assert!(err.to_string().contains("missing environment variable `MISSING_VAR_XYZ`"));
+        assert!(
+            err.to_string()
+                .contains("missing environment variable `MISSING_VAR_XYZ`")
+        );
     }
 
     #[test]

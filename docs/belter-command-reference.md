@@ -9,6 +9,68 @@ Status:
 ## Global Flags
 - `--config <PATH>` (optional): config file path. Default is `belter.toml`.
 - `--json` (optional): output as JSON envelope.
+- `--dry-run` (optional): simulate command without making actual changes. This is specially useful for testing commands on machines that are not the actual infrastructure target (e.g. your local development machine).
+
+### JSON Envelope
+When `--json` is set, commands emit a single structured JSON object on `stdout`.
+
+Top-level fields:
+- `ts`: RFC3339 timestamp for the envelope.
+- `command`: stable command identifier, for example `service.restart`.
+- `status`: command outcome, currently `ok` or `error`.
+- `message`: short canonical summary of the result.
+- `dry_run`: whether the command was simulated.
+- `data`: command payload.
+- `events`: structured auxiliary events; safe to ignore for consumers that only need the main result.
+
+Event fields:
+- `ts`: RFC3339 timestamp for the event.
+- `level`: event severity, for example `debug`, `info`, `warning`, `error`, `fatal`.
+- `code`: stable machine-friendly event code.
+- `message`: human-readable event message.
+- `details`: structured event payload.
+
+Example:
+```json
+{
+  "ts": "2026-03-13T13:05:00.376301Z",
+  "command": "service.restart",
+  "status": "ok",
+  "message": "would restart service `bitcoind`",
+  "dry_run": true,
+  "data": {
+    "plan": {
+      "operations": [
+        {
+          "RestartService": {
+            "manager": "launchd",
+            "unit": "system/com.bitcoind.node"
+          }
+        }
+      ]
+    }
+  },
+  "events": [
+    {
+      "ts": "2026-03-13T13:05:00.376250Z",
+      "level": "info",
+      "code": "service.restart.preview",
+      "message": "1. Would restart `launchd` unit `system/com.bitcoind.node`",
+      "details": {
+        "operation_index": 1,
+        "manager": "launchd",
+        "unit": "system/com.bitcoind.node"
+      }
+    }
+  ]
+}
+```
+
+### Example Usage
+```bash
+# Safe to run locally, even if the target infrastructure (e.g. bitcoind) is not present
+belter --dry-run service restart bitcoind
+```
 
 ## Command Tree
 ```text
