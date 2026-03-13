@@ -5,11 +5,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 #[test]
 fn test_cli_dry_run_parse() {
-    // A simple sanity check that --dry-run is recognized
-    // We would use the actual Cli but we just test via assert_cmd or Command if we wanted
-    // For now we just check the bin runs with --dry-run
-    let output = Command::new("cargo")
-        .args(["run", "-p", "belter", "--", "--dry-run", "service", "list"])
+    let output = Command::new(belter_bin())
+        .args(["--dry-run", "service", "list"])
         .output()
         .expect("failed to execute process");
 
@@ -34,12 +31,8 @@ project = "${MEMPOOL_PROJECT}"
     )
     .expect("config should be written");
 
-    let output = Command::new("cargo")
+    let output = Command::new(belter_bin())
         .args([
-            "run",
-            "-p",
-            "belter",
-            "--",
             "--config",
             config_path.to_str().expect("utf8 path"),
             "--dry-run",
@@ -81,12 +74,8 @@ manager = "launchd"
     )
     .expect("config should be written");
 
-    let output = Command::new("cargo")
+    let output = Command::new(belter_bin())
         .args([
-            "run",
-            "-p",
-            "belter",
-            "--",
             "--config",
             config_path.to_str().expect("utf8 path"),
             "--json",
@@ -114,4 +103,8 @@ fn unique_fixture_dir() -> PathBuf {
         .expect("time should be monotonic")
         .as_nanos();
     std::env::temp_dir().join(format!("belter-cli-test-{ts}"))
+}
+
+fn belter_bin() -> &'static str {
+    env!("CARGO_BIN_EXE_belter")
 }

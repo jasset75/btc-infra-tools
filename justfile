@@ -19,4 +19,7 @@ clippy-fix:
   cargo clippy --workspace --all-targets --all-features --fix --allow-dirty --allow-staged
 
 test:
-  cargo test --all-targets
+  cargo test --workspace
+
+test-cli:
+  cargo test -p belter --all-targets
