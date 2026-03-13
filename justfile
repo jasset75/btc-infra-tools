@@ -15,5 +15,8 @@ check:
 clippy:
   cargo clippy --workspace --all-targets --all-features -- -D warnings
 
+clippy-fix:
+  cargo clippy --workspace --all-targets --all-features --fix --allow-dirty --allow-staged
+
 test:
   cargo test --all-targets

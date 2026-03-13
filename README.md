@@ -59,6 +59,7 @@ mise exec -- just build
 mise exec -- just install
 mise exec -- just check
 mise exec -- just clippy
+mise exec -- just clippy-fix
 ```
 
 Install `belter` binary for direct use (`belter <args>`):
