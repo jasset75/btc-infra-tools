@@ -9,6 +9,7 @@ use infractl_core::usecase::{ServiceAction, ServiceCommandRequest};
 use serde_json::{Value, json};
 use std::fs;
 use std::path::PathBuf;
+use std::process::ExitCode;
 
 #[derive(Debug, Parser)]
 #[command(name = "belter", version, about = "Infrastructure control CLI/TUI")]
@@ -125,7 +126,7 @@ enum UiMode {
     Tui,
 }
 
-#[derive(Debug, Args)]
+#[derive(Debug, Clone, Copy, Args)]
 struct UiArgs {
     #[arg(long, value_enum)]
     ui: Option<UiMode>,
@@ -148,18 +149,47 @@ struct RuntimeDeps<C, E> {
     env_resolver: E,
 }
 
-fn main() -> Result<()> {
-    load_dotenv_if_present()?;
+fn main() -> ExitCode {
     let cli = Cli::parse();
     let deps = RuntimeDeps {
         clock: SystemClock,
         env_resolver: ProcessEnvResolver,
     };
-    match cli.command {
+
+    match run(&deps, &cli) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            if cli.json {
+                let out = error_envelope(
+                    &deps.clock,
+                    command_label(&cli.command),
+                    &error.to_string(),
+                    cli.dry_run,
+                );
+                match serde_json::to_string_pretty(&out) {
+                    Ok(serialized) => println!("{serialized}"),
+                    Err(json_error) => eprintln!(
+                        "Error: failed to serialize JSON error output: {json_error}"
+                    ),
+                }
+            } else {
+                eprintln!("Error: {error}");
+            }
+
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn run<C: Clock, E: EnvResolver>(deps: &RuntimeDeps<C, E>, cli: &Cli) -> Result<()> {
+    load_dotenv_if_present()?;
+    match &cli.command {
         Command::Config { command } => match command {
             ConfigCommand::Init { path, force } => {
-                let target = path.unwrap_or_else(|| PathBuf::from(DEFAULT_CONFIG_FILE));
-                init_config_file(&target, force)?;
+                let target = path
+                    .clone()
+                    .unwrap_or_else(|| PathBuf::from(DEFAULT_CONFIG_FILE));
+                init_config_file(&target, *force)?;
                 emit(
                     &deps.clock,
                     cli.json,
@@ -188,7 +218,7 @@ fn main() -> Result<()> {
                 "configured services: bitcoind, stratum, mempool",
             ),
             ServiceCommand::Status { name, ui } => {
-                let service = name.unwrap_or_else(|| "all".to_string());
+                let service = name.clone().unwrap_or_else(|| "all".to_string());
                 emit(
                     &deps.clock,
                     cli.json,
@@ -205,7 +235,7 @@ fn main() -> Result<()> {
                     &deps.clock,
                     &deps.env_resolver,
                     &cli.config,
-                    &name,
+                    name,
                     ServiceAction::Start,
                     cli.dry_run,
                 ),
@@ -219,7 +249,7 @@ fn main() -> Result<()> {
                     &deps.clock,
                     &deps.env_resolver,
                     &cli.config,
-                    &name,
+                    name,
                     ServiceAction::Stop,
                     cli.dry_run,
                 ),
@@ -233,7 +263,7 @@ fn main() -> Result<()> {
                     &deps.clock,
                     &deps.env_resolver,
                     &cli.config,
-                    &name,
+                    name,
                     ServiceAction::Restart,
                     cli.dry_run,
                 ),
@@ -284,7 +314,7 @@ fn load_dotenv_if_present() -> Result<()> {
 }
 
 fn emit(clock: &dyn Clock, json: bool, command: &str, message: &str) -> Result<()> {
-    let out = output_envelope(clock, command, message, false, Value::Null, Vec::new());
+    let out = output_envelope(clock, command, "ok", message, false, Value::Null, Vec::new());
 
     if json {
         println!("{}", serde_json::to_string_pretty(&out)?);
@@ -297,6 +327,7 @@ fn emit(clock: &dyn Clock, json: bool, command: &str, message: &str) -> Result<(
 fn output_envelope(
     clock: &dyn Clock,
     command: &str,
+    status: &str,
     message: &str,
     dry_run: bool,
     data: Value,
@@ -305,12 +336,24 @@ fn output_envelope(
     OutputEnvelope {
         ts: clock.now_utc_rfc3339(),
         command: command.to_string(),
-        status: "ok".to_string(),
+        status: status.to_string(),
         message: message.to_string(),
         dry_run,
         data,
         events,
     }
+}
+
+fn error_envelope(clock: &dyn Clock, command: &str, message: &str, dry_run: bool) -> OutputEnvelope {
+    output_envelope(
+        clock,
+        command,
+        "error",
+        message,
+        dry_run,
+        Value::Null,
+        Vec::new(),
+    )
 }
 
 fn emit_plan(
@@ -325,6 +368,7 @@ fn emit_plan(
             let out = output_envelope(
                 clock,
                 command,
+                "ok",
                 &plan_result.message,
                 dry_run,
                 json!({
@@ -350,6 +394,34 @@ fn emit_plan(
         Err(e) => {
             bail!(e);
         }
+    }
+}
+
+fn command_label(command: &Command) -> &'static str {
+    match command {
+        Command::Config { command } => match command {
+            ConfigCommand::Init { .. } => "config.init",
+            ConfigCommand::Validate => "config.validate",
+            ConfigCommand::Show => "config.show",
+        },
+        Command::Service { command } => match command {
+            ServiceCommand::List => "service.list",
+            ServiceCommand::Status { .. } => "service.status",
+            ServiceCommand::Start { .. } => "service.start",
+            ServiceCommand::Stop { .. } => "service.stop",
+            ServiceCommand::Restart { .. } => "service.restart",
+            ServiceCommand::Logs { .. } => "service.logs",
+        },
+        Command::Health { command } => match command {
+            HealthCommand::Check { .. } => "health.check",
+            HealthCommand::Snapshot => "health.snapshot",
+        },
+        Command::Run { command } => match command {
+            RunCommand::Action { .. } => "run.action",
+        },
+        Command::Tui { command } => match command {
+            TuiCommand::Dashboard => "tui.dashboard",
+        },
     }
 }
 
@@ -547,7 +619,15 @@ mod tests {
     #[test]
     fn output_envelope_uses_injected_fixed_clock() {
         let clock = FixedClock::new("2026-03-12T10:00:00Z");
-        let out = output_envelope(&clock, "service.list", "ok", false, Value::Null, Vec::new());
+        let out = output_envelope(
+            &clock,
+            "service.list",
+            "ok",
+            "ok",
+            false,
+            Value::Null,
+            Vec::new(),
+        );
         assert_eq!(out.ts, "2026-03-12T10:00:00Z");
         assert_eq!(out.command, "service.list");
         assert_eq!(out.message, "ok");
