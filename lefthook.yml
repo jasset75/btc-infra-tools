@@ -1,10 +1,13 @@
-pre-push:
+pre-commit:
   parallel: false
   commands:
     check:
-      run: cargo check -p belter
+      run: cargo check --workspace
     clippy:
       run: cargo clippy --all-targets --all-features -- -D warnings
+
+pre-push:
+  parallel: false
+  commands:
     test:
       run: cargo test --all-targets
-
