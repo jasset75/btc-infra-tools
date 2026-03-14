@@ -13,6 +13,7 @@ use std::io::Write;
 use std::path::PathBuf;
 
 const LAUNCHD_MANAGER: &str = "launchd";
+const PODMAN_COMPOSE_MANAGER: &str = "podman_compose";
 
 pub(crate) struct StatusEmitCtx<'a, W: Write> {
     pub(crate) clock: &'a dyn Clock,
@@ -89,6 +90,156 @@ pub(crate) fn emit_status<W: Write>(ctx: StatusEmitCtx<'_, W>) -> Result<()> {
             "unit": unit,
             "state": state,
             "pid": pid,
+            "query_error": query_error,
+        });
+        let out = output_envelope(
+            ctx.clock,
+            "service.status",
+            "ok",
+            &message,
+            false,
+            data,
+            Vec::new(),
+        );
+        if ctx.json {
+            writeln!(ctx.stdout, "{}", serde_json::to_string_pretty(&out)?)?;
+        } else {
+            writeln!(ctx.stdout, "[{}] {}: {}", out.ts, out.command, out.message)?;
+        }
+        return Ok(());
+    }
+
+    if service.manager == PODMAN_COMPOSE_MANAGER {
+        let compose_file_tmpl = service.compose_file.as_deref().ok_or_else(|| {
+            anyhow::anyhow!("service `{}` is missing `compose_file`", ctx.service_name)
+        })?;
+        let compose_file = match expand_placeholders(compose_file_tmpl, ctx.env_resolver) {
+            Ok(value) => value,
+            Err(err) => {
+                let out = output_envelope(
+                    ctx.clock,
+                    "service.status",
+                    "ok",
+                    &format!(
+                        "status target={} ui={:?} state=unknown",
+                        ctx.service_name, ctx.ui_mode
+                    ),
+                    false,
+                    json!({
+                        "service": ctx.service_name,
+                        "manager": PODMAN_COMPOSE_MANAGER,
+                        "compose_file": compose_file_tmpl,
+                        "state": "unknown",
+                        "running_containers": Vec::<String>::new(),
+                        "query_error": err.to_string(),
+                    }),
+                    Vec::new(),
+                );
+                if ctx.json {
+                    writeln!(ctx.stdout, "{}", serde_json::to_string_pretty(&out)?)?;
+                } else {
+                    writeln!(ctx.stdout, "[{}] {}: {}", out.ts, out.command, out.message)?;
+                }
+                return Ok(());
+            }
+        };
+        let compose_override = match service
+            .compose_override
+            .as_deref()
+            .map(|value| expand_placeholders(value, ctx.env_resolver))
+            .transpose()
+        {
+            Ok(value) => value,
+            Err(err) => {
+                let out = output_envelope(
+                    ctx.clock,
+                    "service.status",
+                    "ok",
+                    &format!(
+                        "status target={} ui={:?} state=unknown",
+                        ctx.service_name, ctx.ui_mode
+                    ),
+                    false,
+                    json!({
+                        "service": ctx.service_name,
+                        "manager": PODMAN_COMPOSE_MANAGER,
+                        "compose_file": compose_file,
+                        "state": "unknown",
+                        "running_containers": Vec::<String>::new(),
+                        "query_error": err.to_string(),
+                    }),
+                    Vec::new(),
+                );
+                if ctx.json {
+                    writeln!(ctx.stdout, "{}", serde_json::to_string_pretty(&out)?)?;
+                } else {
+                    writeln!(ctx.stdout, "[{}] {}: {}", out.ts, out.command, out.message)?;
+                }
+                return Ok(());
+            }
+        };
+        let project = match service
+            .project
+            .as_deref()
+            .map(|value| expand_placeholders(value, ctx.env_resolver))
+            .transpose()
+        {
+            Ok(value) => value,
+            Err(err) => {
+                let out = output_envelope(
+                    ctx.clock,
+                    "service.status",
+                    "ok",
+                    &format!(
+                        "status target={} ui={:?} state=unknown",
+                        ctx.service_name, ctx.ui_mode
+                    ),
+                    false,
+                    json!({
+                        "service": ctx.service_name,
+                        "manager": PODMAN_COMPOSE_MANAGER,
+                        "compose_file": compose_file,
+                        "compose_override": compose_override,
+                        "state": "unknown",
+                        "running_containers": Vec::<String>::new(),
+                        "query_error": err.to_string(),
+                    }),
+                    Vec::new(),
+                );
+                if ctx.json {
+                    writeln!(ctx.stdout, "{}", serde_json::to_string_pretty(&out)?)?;
+                } else {
+                    writeln!(ctx.stdout, "[{}] {}: {}", out.ts, out.command, out.message)?;
+                }
+                return Ok(());
+            }
+        };
+
+        let (state, running_containers, query_error) =
+            match infractl_adapters::PodmanComposeAdapter.running_container_ids(
+                &compose_file,
+                compose_override.as_deref(),
+                project.as_deref(),
+            ) {
+                Ok(ids) => {
+                    let state = if ids.is_empty() { "stopped" } else { "running" };
+                    (state, ids, None)
+                }
+                Err(err) => ("unknown", Vec::new(), Some(err.to_string())),
+            };
+
+        let message = format!(
+            "status target={} ui={:?} state={state}",
+            ctx.service_name, ctx.ui_mode
+        );
+        let data = json!({
+            "service": ctx.service_name,
+            "manager": PODMAN_COMPOSE_MANAGER,
+            "compose_file": compose_file,
+            "compose_override": compose_override,
+            "project": project,
+            "state": state,
+            "running_containers": running_containers,
             "query_error": query_error,
         });
         let out = output_envelope(

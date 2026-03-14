@@ -124,6 +124,28 @@ impl PodmanComposeAdapter {
         )
     }
 
+    pub fn running_container_ids(
+        &self,
+        compose_file: &str,
+        compose_override: Option<&str>,
+        project: Option<&str>,
+    ) -> Result<Vec<String>> {
+        let output = self.run_compose_capture(
+            compose_file,
+            compose_override,
+            project,
+            &["ps", "-q"],
+            "status",
+        )?;
+
+        Ok(output
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(ToOwned::to_owned)
+            .collect())
+    }
+
     fn run_compose(
         &self,
         compose_file: &str,
@@ -145,6 +167,37 @@ impl PodmanComposeAdapter {
         let output = Command::new("podman").args(&args).output()?;
         if output.status.success() {
             return Ok(());
+        }
+
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let code = output.status.code();
+        bail!(
+            "podman compose {action} failed (compose_file={compose_file}, override={compose_override:?}, project={project:?}, status={code:?}, stdout={stdout}, stderr={stderr})"
+        )
+    }
+
+    fn run_compose_capture(
+        &self,
+        compose_file: &str,
+        compose_override: Option<&str>,
+        project: Option<&str>,
+        action_args: &[&str],
+        action: &str,
+    ) -> Result<String> {
+        let mut args = vec!["compose"];
+        if let Some(project) = project {
+            args.extend(["-p", project]);
+        }
+        args.extend(["-f", compose_file]);
+        if let Some(compose_override) = compose_override {
+            args.extend(["-f", compose_override]);
+        }
+        args.extend(action_args);
+
+        let output = Command::new("podman").args(&args).output()?;
+        if output.status.success() {
+            return Ok(String::from_utf8_lossy(&output.stdout).to_string());
         }
 
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
