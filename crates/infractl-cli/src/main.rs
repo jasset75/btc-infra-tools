@@ -1,5 +1,5 @@
 use anyhow::{Context, Result, bail};
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap::Parser;
 use infractl_core::config::{BelterConfig, DEFAULT_CONFIG_FILE, default_config_template};
 use infractl_core::env::{EnvResolver, ProcessEnvResolver, expand_placeholders};
 use infractl_core::output::{OutputEnvelope, OutputEvent};
@@ -13,170 +13,15 @@ use std::io::{self, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+mod cli;
+mod runtime;
+
+use crate::cli::{Cli, Command, ConfigCommand, HealthCommand, RunCommand, ServiceCommand, TuiCommand, UiMode};
+use crate::runtime::{DotenvLoader, ProcessDotenvLoader, RuntimeDeps};
+#[cfg(test)]
+use crate::runtime::NoopDotenvLoader;
+
 const LAUNCHD_MANAGER: &str = "launchd";
-
-#[derive(Debug, Parser)]
-#[command(name = "belter", version, about = "Infrastructure control CLI/TUI")]
-struct Cli {
-    #[command(subcommand)]
-    command: Command,
-
-    #[arg(
-        long,
-        global = true,
-        default_value = DEFAULT_CONFIG_FILE,
-        help = "Path to belter config file"
-    )]
-    config: PathBuf,
-
-    #[arg(long, global = true, help = "Emit machine-readable JSON output")]
-    json: bool,
-
-    #[arg(
-        long,
-        global = true,
-        help = "Simulate command without making actual changes"
-    )]
-    dry_run: bool,
-}
-
-#[derive(Debug, Subcommand)]
-enum Command {
-    Config {
-        #[command(subcommand)]
-        command: ConfigCommand,
-    },
-    Service {
-        #[command(subcommand)]
-        command: ServiceCommand,
-    },
-    Health {
-        #[command(subcommand)]
-        command: HealthCommand,
-    },
-    Run {
-        #[command(subcommand)]
-        command: RunCommand,
-    },
-    Tui {
-        #[command(subcommand)]
-        command: TuiCommand,
-    },
-}
-
-#[derive(Debug, Subcommand)]
-enum ConfigCommand {
-    Init {
-        #[arg(long, help = "Write config file to a custom path")]
-        path: Option<PathBuf>,
-        #[arg(long, help = "Overwrite target file if it already exists")]
-        force: bool,
-    },
-    Validate,
-    Show,
-}
-
-#[derive(Debug, Subcommand)]
-enum ServiceCommand {
-    List,
-    Status {
-        name: Option<String>,
-        #[command(flatten)]
-        ui: UiArgs,
-    },
-    Start {
-        name: String,
-    },
-    Stop {
-        name: String,
-    },
-    Restart {
-        name: String,
-    },
-    Logs {
-        name: String,
-        #[arg(long)]
-        follow: bool,
-    },
-}
-
-#[derive(Debug, Subcommand)]
-enum HealthCommand {
-    Check {
-        #[arg(long, conflicts_with = "id")]
-        all: bool,
-        #[arg(long)]
-        id: Option<String>,
-        #[command(flatten)]
-        ui: UiArgs,
-    },
-    Snapshot,
-}
-
-#[derive(Debug, Subcommand)]
-enum RunCommand {
-    Action { id: String },
-}
-
-#[derive(Debug, Subcommand)]
-enum TuiCommand {
-    Dashboard,
-}
-
-#[derive(Debug, Clone, Copy, ValueEnum)]
-enum UiMode {
-    Auto,
-    Cli,
-    Tui,
-}
-
-#[derive(Debug, Clone, Copy, Args)]
-struct UiArgs {
-    #[arg(long, value_enum)]
-    ui: Option<UiMode>,
-    #[arg(long, conflicts_with = "ui", help = "Shortcut for --ui tui")]
-    tui: bool,
-}
-
-impl UiArgs {
-    fn effective(self) -> UiMode {
-        if self.tui {
-            UiMode::Tui
-        } else {
-            self.ui.unwrap_or(UiMode::Auto)
-        }
-    }
-}
-
-/// Loads `.env` values before command execution.
-///
-/// This is injected so tests can avoid mutating process environment.
-trait DotenvLoader {
-    fn load_if_present(&self) -> Result<()>;
-}
-
-/// Production `.env` loader backed by `dotenvy`.
-struct ProcessDotenvLoader;
-
-impl DotenvLoader for ProcessDotenvLoader {
-    fn load_if_present(&self) -> Result<()> {
-        let path = PathBuf::from(".env");
-        if !path.exists() {
-            return Ok(());
-        }
-
-        dotenvy::from_filename(&path)
-            .with_context(|| format!("failed to load environment from {}", path.display()))?;
-        Ok(())
-    }
-}
-
-struct RuntimeDeps<C, E, D> {
-    clock: C,
-    env_resolver: E,
-    /// Strategy used to load dotenv values for the current runtime.
-    dotenv_loader: D,
-}
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
@@ -766,14 +611,6 @@ fn action_label(action: ServiceAction) -> &'static str {
         ServiceAction::Restart => "restart",
     }
 }
-    #[allow(dead_code)]
-    struct NoopDotenvLoader;
-
-    impl DotenvLoader for NoopDotenvLoader {
-        fn load_if_present(&self) -> Result<()> {
-            Ok(())
-        }
-    }
 
 #[cfg(test)]
 mod tests {
