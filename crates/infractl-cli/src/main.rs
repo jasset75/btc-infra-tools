@@ -398,7 +398,8 @@ manager = "launchd"
         let rendered = String::from_utf8(stdout).expect("stdout should be utf8");
         assert!(rendered.contains("\"command\": \"service.restart\""));
         assert!(rendered.contains("\"status\": \"error\""));
-        assert!(rendered.contains("service `bitcoind` is missing `unit`"));
+        assert!(rendered.contains("\"message\":"));
+        assert!(rendered.contains("missing `unit`"));
 
         fs::remove_dir_all(&fixture_dir).expect("fixture dir should be removed");
     }

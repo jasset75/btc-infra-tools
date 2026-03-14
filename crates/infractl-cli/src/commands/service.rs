@@ -1,5 +1,5 @@
 use crate::cli::UiMode;
-use crate::output::{emit, emit_dry_run_report, output_envelope};
+use crate::output::{emit_dry_run_report, output_envelope};
 use anyhow::{Context, Result, bail};
 use infractl_core::config::BelterConfig;
 use infractl_core::env::{EnvResolver, expand_placeholders};
@@ -88,7 +88,12 @@ pub(crate) struct StatusEmitCtx<'a, W: Write> {
     pub(crate) ui_mode: UiMode,
 }
 
-pub(crate) fn emit_status<W: Write>(mut ctx: StatusEmitCtx<'_, W>) -> Result<()> {
+struct StatusComputation {
+    message: String,
+    data: ServiceStatusData,
+}
+
+pub(crate) fn emit_status<W: Write>(ctx: StatusEmitCtx<'_, W>) -> Result<()> {
     let raw = fs::read_to_string(ctx.config_path)
         .with_context(|| format!("failed to read config file {}", ctx.config_path.display()))?;
     let config: BelterConfig = toml::from_str(&raw)
@@ -128,6 +133,17 @@ pub(crate) fn emit_status<W: Write>(mut ctx: StatusEmitCtx<'_, W>) -> Result<()>
         return Ok(());
     }
 
+    let computed = compute_status(&ctx, service)?;
+    emit_status_out(
+        ctx.clock,
+        ctx.stdout,
+        ctx.json,
+        &computed.message,
+        computed.data,
+    )
+}
+
+fn compute_status(ctx: &StatusEmitCtx<'_, impl Write>, service: &infractl_core::config::ServiceConfig) -> Result<StatusComputation> {
     if service.manager == LAUNCHD_MANAGER {
         let unit_tmpl = service
             .unit
@@ -146,10 +162,11 @@ pub(crate) fn emit_status<W: Write>(mut ctx: StatusEmitCtx<'_, W>) -> Result<()>
             "status target={} ui={:?} state={state}",
             ctx.service_name, ctx.ui_mode
         );
-        let status_data =
-            ServiceStatusData::launchd(ctx.service_name, unit, state, pid, query_error);
-        emit_status_out(&mut ctx, &message, status_data)?;
-        return Ok(());
+        let status_data = ServiceStatusData::launchd(ctx.service_name, unit, state, pid, query_error);
+        return Ok(StatusComputation {
+            message,
+            data: status_data,
+        });
     }
 
     if service.manager == PODMAN_COMPOSE_MANAGER {
@@ -160,8 +177,8 @@ pub(crate) fn emit_status<W: Write>(mut ctx: StatusEmitCtx<'_, W>) -> Result<()>
         let compose_file = match expand_placeholders(compose_file_tmpl, ctx.env_resolver) {
             Ok(value) => value,
             Err(err) => {
-                return emit_unknown_status(
-                    &mut ctx,
+                return Ok(unknown_status(
+                    ctx,
                     ServiceStatusData::podman(
                         &service_name,
                         Some(compose_file_tmpl.to_string()),
@@ -171,7 +188,7 @@ pub(crate) fn emit_status<W: Write>(mut ctx: StatusEmitCtx<'_, W>) -> Result<()>
                         Vec::new(),
                         Some(err.to_string()),
                     ),
-                );
+                ));
             }
         };
         let compose_override = match service
@@ -182,8 +199,8 @@ pub(crate) fn emit_status<W: Write>(mut ctx: StatusEmitCtx<'_, W>) -> Result<()>
         {
             Ok(value) => value,
             Err(err) => {
-                return emit_unknown_status(
-                    &mut ctx,
+                return Ok(unknown_status(
+                    ctx,
                     ServiceStatusData::podman(
                         &service_name,
                         Some(compose_file.clone()),
@@ -193,7 +210,7 @@ pub(crate) fn emit_status<W: Write>(mut ctx: StatusEmitCtx<'_, W>) -> Result<()>
                         Vec::new(),
                         Some(err.to_string()),
                     ),
-                );
+                ));
             }
         };
         let project = match service
@@ -204,8 +221,8 @@ pub(crate) fn emit_status<W: Write>(mut ctx: StatusEmitCtx<'_, W>) -> Result<()>
         {
             Ok(value) => value,
             Err(err) => {
-                return emit_unknown_status(
-                    &mut ctx,
+                return Ok(unknown_status(
+                    ctx,
                     ServiceStatusData::podman(
                         &service_name,
                         Some(compose_file.clone()),
@@ -215,7 +232,7 @@ pub(crate) fn emit_status<W: Write>(mut ctx: StatusEmitCtx<'_, W>) -> Result<()>
                         Vec::new(),
                         Some(err.to_string()),
                     ),
-                );
+                ));
             }
         };
 
@@ -245,45 +262,52 @@ pub(crate) fn emit_status<W: Write>(mut ctx: StatusEmitCtx<'_, W>) -> Result<()>
             running_containers,
             query_error,
         );
-        emit_status_out(&mut ctx, &message, status_data)?;
-        return Ok(());
+        return Ok(StatusComputation {
+            message,
+            data: status_data,
+        });
     }
 
-    emit(
-        ctx.clock,
-        ctx.stdout,
-        ctx.json,
-        false,
-        "service.status",
-        &format!(
+    Ok(StatusComputation {
+        message: format!(
             "status target={} ui={:?} manager={} (real status not implemented)",
             ctx.service_name, ctx.ui_mode, service.manager
         ),
-    )
+        data: ServiceStatusData {
+            service: ctx.service_name.to_string(),
+            manager: service.manager.clone(),
+            state: "unknown".to_string(),
+            unit: None,
+            pid: None,
+            compose_file: None,
+            compose_override: None,
+            project: None,
+            running_containers: None,
+            query_error: None,
+        },
+    })
 }
 
-fn emit_unknown_status<W: Write>(
-    ctx: &mut StatusEmitCtx<'_, W>,
-    status_data: ServiceStatusData,
-) -> Result<()> {
-    emit_status_out(
-        ctx,
-        &format!(
+fn unknown_status(ctx: &StatusEmitCtx<'_, impl Write>, data: ServiceStatusData) -> StatusComputation {
+    StatusComputation {
+        message: format!(
             "status target={} ui={:?} state=unknown",
             ctx.service_name, ctx.ui_mode
         ),
-        status_data,
-    )
+        data,
+    }
 }
 
 fn emit_status_out<W: Write>(
-    ctx: &mut StatusEmitCtx<'_, W>,
+    clock: &dyn Clock,
+    stdout: &mut W,
+    json: bool,
     message: &str,
     status_data: ServiceStatusData,
 ) -> Result<()> {
     let data = serde_json::to_value(status_data).context("failed to serialize status data")?;
     let out = output_envelope(
-        ctx.clock,
+        clock,
         "service.status",
         "ok",
         message,
@@ -291,10 +315,10 @@ fn emit_status_out<W: Write>(
         data,
         Vec::new(),
     );
-    if ctx.json {
-        writeln!(ctx.stdout, "{}", serde_json::to_string_pretty(&out)?)?;
+    if json {
+        writeln!(stdout, "{}", serde_json::to_string_pretty(&out)?)?;
     } else {
-        writeln!(ctx.stdout, "[{}] {}: {}", out.ts, out.command, out.message)?;
+        writeln!(stdout, "[{}] {}: {}", out.ts, out.command, out.message)?;
     }
     Ok(())
 }
