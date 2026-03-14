@@ -1,16 +1,19 @@
 use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use infractl_core::config::{BelterConfig, DEFAULT_CONFIG_FILE, default_config_template};
-use infractl_core::env::{EnvResolver, ProcessEnvResolver};
+use infractl_core::env::{EnvResolver, ProcessEnvResolver, expand_placeholders};
 use infractl_core::output::{OutputEnvelope, OutputEvent};
 use infractl_core::plan::{ExecutionDetails, ExecutionReport, Plan};
 use infractl_core::time::{Clock, SystemClock};
 use infractl_core::usecase::{ServiceAction, ServiceCommandRequest};
+use serde::Serialize;
 use serde_json::{Value, json};
 use std::fs;
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
+
+const LAUNCHD_MANAGER: &str = "launchd";
 
 #[derive(Debug, Parser)]
 #[command(name = "belter", version, about = "Infrastructure control CLI/TUI")]
@@ -242,6 +245,7 @@ fn run<C: Clock, E: EnvResolver, D: DotenvLoader, O: Write>(
                     &deps.clock,
                     stdout,
                     cli.json,
+                    cli.dry_run,
                     "config.init",
                     &format!("created configuration file at {}", target.display()),
                 )
@@ -250,6 +254,7 @@ fn run<C: Clock, E: EnvResolver, D: DotenvLoader, O: Write>(
                 &deps.clock,
                 stdout,
                 cli.json,
+                cli.dry_run,
                 "config.validate",
                 "configuration is valid",
             ),
@@ -257,6 +262,7 @@ fn run<C: Clock, E: EnvResolver, D: DotenvLoader, O: Write>(
                 &deps.clock,
                 stdout,
                 cli.json,
+                cli.dry_run,
                 "config.show",
                 "showing effective configuration",
             ),
@@ -266,18 +272,31 @@ fn run<C: Clock, E: EnvResolver, D: DotenvLoader, O: Write>(
                 &deps.clock,
                 stdout,
                 cli.json,
+                cli.dry_run,
                 "service.list",
                 "configured services: bitcoind, stratum, mempool",
             ),
             ServiceCommand::Status { name, ui } => {
-                let service = name.clone().unwrap_or_else(|| "all".to_string());
-                emit(
-                    &deps.clock,
-                    stdout,
-                    cli.json,
-                    "service.status",
-                    &format!("status target={service} ui={:?}", ui.effective()),
-                )
+                match name {
+                    Some(service_name) => emit_status(StatusEmitCtx {
+                        clock: &deps.clock,
+                        stdout,
+                        json: cli.json,
+                        dry_run: cli.dry_run,
+                        config_path: &cli.config,
+                        env_resolver: &deps.env_resolver,
+                        service_name,
+                        ui_mode: ui.effective(),
+                    }),
+                    None => emit(
+                        &deps.clock,
+                        stdout,
+                        cli.json,
+                        cli.dry_run,
+                        "service.status",
+                        &format!("status target=all ui={:?}", ui.effective()),
+                    ),
+                }
             }
             ServiceCommand::Start { name } => emit_plan(
                 &deps.clock,
@@ -325,6 +344,7 @@ fn run<C: Clock, E: EnvResolver, D: DotenvLoader, O: Write>(
                 &deps.clock,
                 stdout,
                 cli.json,
+                cli.dry_run,
                 "service.logs",
                 &format!("logs target={name} follow={follow}"),
             ),
@@ -334,6 +354,7 @@ fn run<C: Clock, E: EnvResolver, D: DotenvLoader, O: Write>(
                 &deps.clock,
                 stdout,
                 cli.json,
+                cli.dry_run,
                 "health.check",
                 &format!("check all={all} id={id:?} ui={:?}", ui.effective()),
             ),
@@ -341,6 +362,7 @@ fn run<C: Clock, E: EnvResolver, D: DotenvLoader, O: Write>(
                 &deps.clock,
                 stdout,
                 cli.json,
+                cli.dry_run,
                 "health.snapshot",
                 "snapshot generated",
             ),
@@ -351,6 +373,7 @@ fn run<C: Clock, E: EnvResolver, D: DotenvLoader, O: Write>(
                     &deps.clock,
                     stdout,
                     cli.json,
+                    cli.dry_run,
                     "run.action",
                     &format!("action={id}"),
                 )
@@ -362,6 +385,7 @@ fn run<C: Clock, E: EnvResolver, D: DotenvLoader, O: Write>(
                     &deps.clock,
                     stdout,
                     cli.json,
+                    cli.dry_run,
                     "tui.dashboard",
                     "starting dashboard",
                 )
@@ -370,14 +394,150 @@ fn run<C: Clock, E: EnvResolver, D: DotenvLoader, O: Write>(
     }
 }
 
+struct StatusEmitCtx<'a, W: Write> {
+    clock: &'a dyn Clock,
+    stdout: &'a mut W,
+    json: bool,
+    dry_run: bool,
+    config_path: &'a PathBuf,
+    env_resolver: &'a dyn EnvResolver,
+    service_name: &'a str,
+    ui_mode: UiMode,
+}
+
+#[derive(Serialize)]
+struct DryRunTextReport<'a> {
+    command: &'a str,
+    status: &'a str,
+    message: &'a str,
+    dry_run: bool,
+    data: &'a Value,
+}
+
+fn dry_run_text_report(out: &OutputEnvelope) -> DryRunTextReport<'_> {
+    DryRunTextReport {
+        command: &out.command,
+        status: &out.status,
+        message: &out.message,
+        dry_run: out.dry_run,
+        data: &out.data,
+    }
+}
+
+fn emit_status<W: Write>(ctx: StatusEmitCtx<'_, W>) -> Result<()> {
+    let raw = fs::read_to_string(ctx.config_path)
+        .with_context(|| format!("failed to read config file {}", ctx.config_path.display()))?;
+    let config: BelterConfig = toml::from_str(&raw).with_context(|| {
+        format!(
+            "failed to parse TOML from {}",
+            ctx.config_path.display()
+        )
+    })?;
+
+    let services = config
+        .service
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("missing [service] section"))?;
+    let service = services
+        .get(ctx.service_name)
+        .ok_or_else(|| anyhow::anyhow!("service `{}` not found in config", ctx.service_name))?;
+
+    if ctx.dry_run {
+        let out = output_envelope(
+            ctx.clock,
+            "service.status",
+            "ok",
+            &format!(
+                "would query status target={} ui={:?}",
+                ctx.service_name, ctx.ui_mode
+            ),
+            true,
+            json!({
+                "service": ctx.service_name,
+                "manager": service.manager,
+                "simulated": true,
+            }),
+            Vec::new(),
+        );
+        if ctx.json {
+            writeln!(ctx.stdout, "{}", serde_json::to_string_pretty(&out)?)?;
+        } else {
+            writeln!(ctx.stdout, "[{}] {}: {}", out.ts, out.command, out.message)?;
+            writeln!(ctx.stdout, "[DRY-RUN] Report:")?;
+            writeln!(
+                ctx.stdout,
+                "{}",
+                serde_json::to_string_pretty(&dry_run_text_report(&out))?
+            )?;
+        }
+        return Ok(());
+    }
+
+    if service.manager == LAUNCHD_MANAGER {
+        let unit_tmpl = service
+            .unit
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("service `{}` is missing `unit`", ctx.service_name))?;
+        let unit = expand_placeholders(unit_tmpl, ctx.env_resolver)?;
+        let (state, pid, query_error) =
+            match infractl_adapters::LaunchdAdapter.unit_pid_for_status(&unit) {
+            Ok(pid) => {
+                let state = if pid.is_some() { "running" } else { "stopped" };
+                (state, pid, None)
+            }
+            Err(err) => ("unknown", None, Some(err.to_string())),
+        };
+        let message = format!(
+            "status target={} ui={:?} state={state}",
+            ctx.service_name, ctx.ui_mode
+        );
+        let data = json!({
+            "service": ctx.service_name,
+            "manager": LAUNCHD_MANAGER,
+            "unit": unit,
+            "state": state,
+            "pid": pid,
+            "query_error": query_error,
+        });
+        let out = output_envelope(
+            ctx.clock,
+            "service.status",
+            "ok",
+            &message,
+            false,
+            data,
+            Vec::new(),
+        );
+        if ctx.json {
+            writeln!(ctx.stdout, "{}", serde_json::to_string_pretty(&out)?)?;
+        } else {
+            writeln!(ctx.stdout, "[{}] {}: {}", out.ts, out.command, out.message)?;
+        }
+        return Ok(());
+    }
+
+    emit(
+        ctx.clock,
+        ctx.stdout,
+        ctx.json,
+        false,
+        "service.status",
+        &format!(
+            "status target={} ui={:?} manager={} (real status not implemented)",
+            ctx.service_name, ctx.ui_mode, service.manager
+        ),
+    )
+}
+
 fn emit<W: Write>(
     clock: &dyn Clock,
     stdout: &mut W,
     json: bool,
+    dry_run: bool,
     command: &str,
     message: &str,
 ) -> Result<()> {
-    let out = output_envelope(clock, command, "ok", message, false, Value::Null, Vec::new());
+    let out = output_envelope(clock, command, "ok", message, dry_run, Value::Null, Vec::new());
 
     if json {
         writeln!(stdout, "{}", serde_json::to_string_pretty(&out)?)?;

@@ -67,6 +67,7 @@ dependencies = [
  "dotenvy",
  "infractl-adapters",
  "infractl-core",
+ "serde",
  "serde_json",
  "toml",
 ]

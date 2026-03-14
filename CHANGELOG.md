@@ -34,6 +34,12 @@ The project follows semantic versioning.
 - Refactored CLI dotenv bootstrap to dependency injection (`DotenvLoader`) so tests can run without mutating process environment.
 - Updated `lefthook` pre-push test command to use an isolated cargo target directory (`CARGO_TARGET_DIR=target/lefthook-prepush`) to reduce build lock contention.
 - Updated default local example configuration and docs to include mempool placeholders (`MEMPOOL_COMPOSE_FILE`, `MEMPOOL_COMPOSE_OVERRIDE`, `MEMPOOL_PROJECT`) and a practical `.env` sample.
+- Updated dry-run output model:
+  - `--dry-run --json` for service plan commands no longer emits redundant preview events.
+  - textual dry-run output now renders a JSON-shaped report block aligned with envelope fields.
+- Updated `service status <name>` behavior:
+  - launchd-backed services now query real runtime status and report it in `data` (`state`, `pid`, `unit`).
+  - `--dry-run` now returns simulated status payloads (`dry_run: true`, `data.simulated: true`) instead of reporting non-dry-run envelopes.
 
 ## [0.1.0] - 2026-03-10
 

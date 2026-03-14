@@ -123,8 +123,12 @@ belter
   - `name` (optional, default: all)
   - `--ui <auto|cli|tui>` (optional)
   - `--tui` (optional; shortcut for `--ui tui`; mutually exclusive with `--ui`)
-- UI behavior differences:
-  - Current implementation: no output behavior change yet; mode is reported in output.
+- Behavior:
+  - Loads `service.<name>` from config when `name` is provided.
+  - `launchd` services: resolves `unit`, queries runtime status via `launchctl print`, and reports state in `data` (`running|stopped|unknown`) with optional `pid`.
+  - Non-`launchd` services currently return a descriptive scaffold message indicating real status is not yet implemented.
+  - `--dry-run`: does not query runtime state; returns a simulated status payload (`data.simulated = true`) and sets `dry_run = true` in the envelope.
+  - `--json`: returns machine-readable envelope; command-level `status` indicates CLI execution success, while service runtime state is exposed in `data.state` when available.
 
 ### `service start <name>`
 - Parameters:
@@ -133,8 +137,8 @@ belter
   - Loads `service.<name>` from config.
   - `launchd`: executes start against configured `unit`.
   - `podman_compose`: executes `podman compose ... up -d` using configured compose file(s) and optional project.
-  - `--dry-run`: emits preview events and serialized plan without executing commands.
-  - `--json`: returns machine-readable envelope including `plan` and `events`.
+  - `--dry-run`: returns simulated plan data without executing commands.
+  - `--json`: returns machine-readable envelope including `plan`; dry-run preview events are omitted.
 
 ### `service stop <name>`
 - Parameters:
@@ -143,8 +147,8 @@ belter
   - Loads `service.<name>` from config.
   - `launchd`: executes stop against configured `unit`.
   - `podman_compose`: executes `podman compose ... down` using configured compose file(s) and optional project.
-  - `--dry-run`: emits preview events and serialized plan without executing commands.
-  - `--json`: returns machine-readable envelope including `plan` and `events`.
+  - `--dry-run`: returns simulated plan data without executing commands.
+  - `--json`: returns machine-readable envelope including `plan`; dry-run preview events are omitted.
 
 ### `service restart <name>`
 - Parameters:
@@ -156,8 +160,8 @@ belter
   - `podman_compose`: requires `compose_file`; optional `compose_override` and `project`.
   - `podman_compose` restart is implemented as `podman compose ... down` followed by `podman compose ... up -d`.
   - If `.env` exists in current directory, it is autoloaded before command execution.
-  - `--dry-run`: emits preview events and serialized plan without executing commands.
-  - `--json`: returns machine-readable envelope including `plan` and `events`.
+  - `--dry-run`: returns simulated plan data without executing commands.
+  - `--json`: returns machine-readable envelope including `plan`; dry-run preview events are omitted.
 - Operational notes:
   - For launchd units in `system/...`, restart may require elevation (`sudo -E`).
   - Unit must be full launchd target (`<domain>/<label>`, for example `system/com.bitcoind.node`).

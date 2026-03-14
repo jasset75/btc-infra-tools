@@ -14,6 +14,10 @@ pub trait ServiceAdapter {
 pub struct LaunchdAdapter;
 
 impl LaunchdAdapter {
+    pub fn unit_pid_for_status(&self, unit: &str) -> Result<Option<i32>> {
+        self.unit_pid(unit)
+    }
+
     pub fn start_unit(&self, unit: &str) -> Result<()> {
         self.run_launchctl(&["bootstrap", unit], unit, "start")
     }
