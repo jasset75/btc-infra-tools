@@ -53,3 +53,40 @@ fn test_cli_status_mempool_dry_run_json() {
     assert!(stdout.contains("\"dry_run\": true"));
     assert!(stdout.contains("\"simulated\": true"));
 }
+
+#[test]
+fn test_cli_status_mempool_json_unknown_when_env_missing() {
+    let output = Command::new(belter_bin())
+        .args(["--json", "service", "status", "mempool"])
+        .current_dir(repo_root())
+        .output()
+        .expect("failed to execute process");
+
+    assert!(output.status.success());
+
+    let stdout = String::from_utf8(output.stdout).expect("stdout should be utf8");
+    assert!(stdout.contains("\"command\": \"service.status\""));
+    assert!(stdout.contains("\"manager\": \"podman_compose\""));
+    assert!(stdout.contains("\"state\": \"unknown\""));
+    assert!(stdout.contains("\"query_error\":"));
+}
+
+#[test]
+fn test_cli_status_mempool_json_contains_podman_fields_when_env_present() {
+    let output = Command::new(belter_bin())
+        .args(["--json", "service", "status", "mempool"])
+        .current_dir(repo_root())
+        .env("MEMPOOL_COMPOSE_FILE", "/tmp/base.yml")
+        .env("MEMPOOL_COMPOSE_OVERRIDE", "/tmp/override.yml")
+        .env("MEMPOOL_PROJECT", "docker")
+        .output()
+        .expect("failed to execute process");
+
+    assert!(output.status.success());
+
+    let stdout = String::from_utf8(output.stdout).expect("stdout should be utf8");
+    assert!(stdout.contains("\"command\": \"service.status\""));
+    assert!(stdout.contains("\"manager\": \"podman_compose\""));
+    assert!(stdout.contains("\"compose_file\": \"/tmp/base.yml\""));
+    assert!(stdout.contains("\"running_containers\":"));
+}

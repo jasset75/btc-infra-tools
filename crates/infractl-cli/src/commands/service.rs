@@ -7,6 +7,7 @@ use infractl_core::output::OutputEvent;
 use infractl_core::plan::{ExecutionDetails, ExecutionReport, Plan};
 use infractl_core::time::Clock;
 use infractl_core::usecase::{ServiceAction, ServiceCommandRequest};
+use serde::Serialize;
 use serde_json::json;
 use std::fs;
 use std::io::Write;
@@ -14,6 +15,67 @@ use std::path::PathBuf;
 
 const LAUNCHD_MANAGER: &str = "launchd";
 const PODMAN_COMPOSE_MANAGER: &str = "podman_compose";
+
+#[derive(Serialize)]
+struct ServiceStatusData {
+    service: String,
+    manager: String,
+    state: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    unit: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pid: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    compose_file: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    compose_override: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    project: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    running_containers: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    query_error: Option<String>,
+}
+
+impl ServiceStatusData {
+    fn launchd(service: &str, unit: String, state: &str, pid: Option<i32>, query_error: Option<String>) -> Self {
+        Self {
+            service: service.to_string(),
+            manager: LAUNCHD_MANAGER.to_string(),
+            state: state.to_string(),
+            unit: Some(unit),
+            pid,
+            compose_file: None,
+            compose_override: None,
+            project: None,
+            running_containers: None,
+            query_error,
+        }
+    }
+
+    fn podman(
+        service: &str,
+        compose_file: Option<String>,
+        compose_override: Option<String>,
+        project: Option<String>,
+        state: &str,
+        running_containers: Vec<String>,
+        query_error: Option<String>,
+    ) -> Self {
+        Self {
+            service: service.to_string(),
+            manager: PODMAN_COMPOSE_MANAGER.to_string(),
+            state: state.to_string(),
+            unit: None,
+            pid: None,
+            compose_file,
+            compose_override,
+            project,
+            running_containers: Some(running_containers),
+            query_error,
+        }
+    }
+}
 
 pub(crate) struct StatusEmitCtx<'a, W: Write> {
     pub(crate) clock: &'a dyn Clock,
@@ -26,7 +88,7 @@ pub(crate) struct StatusEmitCtx<'a, W: Write> {
     pub(crate) ui_mode: UiMode,
 }
 
-pub(crate) fn emit_status<W: Write>(ctx: StatusEmitCtx<'_, W>) -> Result<()> {
+pub(crate) fn emit_status<W: Write>(mut ctx: StatusEmitCtx<'_, W>) -> Result<()> {
     let raw = fs::read_to_string(ctx.config_path)
         .with_context(|| format!("failed to read config file {}", ctx.config_path.display()))?;
     let config: BelterConfig = toml::from_str(&raw)
@@ -84,63 +146,32 @@ pub(crate) fn emit_status<W: Write>(ctx: StatusEmitCtx<'_, W>) -> Result<()> {
             "status target={} ui={:?} state={state}",
             ctx.service_name, ctx.ui_mode
         );
-        let data = json!({
-            "service": ctx.service_name,
-            "manager": LAUNCHD_MANAGER,
-            "unit": unit,
-            "state": state,
-            "pid": pid,
-            "query_error": query_error,
-        });
-        let out = output_envelope(
-            ctx.clock,
-            "service.status",
-            "ok",
-            &message,
-            false,
-            data,
-            Vec::new(),
-        );
-        if ctx.json {
-            writeln!(ctx.stdout, "{}", serde_json::to_string_pretty(&out)?)?;
-        } else {
-            writeln!(ctx.stdout, "[{}] {}: {}", out.ts, out.command, out.message)?;
-        }
+        let status_data =
+            ServiceStatusData::launchd(ctx.service_name, unit, state, pid, query_error);
+        emit_status_out(&mut ctx, &message, status_data)?;
         return Ok(());
     }
 
     if service.manager == PODMAN_COMPOSE_MANAGER {
+        let service_name = ctx.service_name.to_string();
         let compose_file_tmpl = service.compose_file.as_deref().ok_or_else(|| {
             anyhow::anyhow!("service `{}` is missing `compose_file`", ctx.service_name)
         })?;
         let compose_file = match expand_placeholders(compose_file_tmpl, ctx.env_resolver) {
             Ok(value) => value,
             Err(err) => {
-                let out = output_envelope(
-                    ctx.clock,
-                    "service.status",
-                    "ok",
-                    &format!(
-                        "status target={} ui={:?} state=unknown",
-                        ctx.service_name, ctx.ui_mode
+                return emit_unknown_status(
+                    &mut ctx,
+                    ServiceStatusData::podman(
+                        &service_name,
+                        Some(compose_file_tmpl.to_string()),
+                        None,
+                        None,
+                        "unknown",
+                        Vec::new(),
+                        Some(err.to_string()),
                     ),
-                    false,
-                    json!({
-                        "service": ctx.service_name,
-                        "manager": PODMAN_COMPOSE_MANAGER,
-                        "compose_file": compose_file_tmpl,
-                        "state": "unknown",
-                        "running_containers": Vec::<String>::new(),
-                        "query_error": err.to_string(),
-                    }),
-                    Vec::new(),
                 );
-                if ctx.json {
-                    writeln!(ctx.stdout, "{}", serde_json::to_string_pretty(&out)?)?;
-                } else {
-                    writeln!(ctx.stdout, "[{}] {}: {}", out.ts, out.command, out.message)?;
-                }
-                return Ok(());
             }
         };
         let compose_override = match service
@@ -151,31 +182,18 @@ pub(crate) fn emit_status<W: Write>(ctx: StatusEmitCtx<'_, W>) -> Result<()> {
         {
             Ok(value) => value,
             Err(err) => {
-                let out = output_envelope(
-                    ctx.clock,
-                    "service.status",
-                    "ok",
-                    &format!(
-                        "status target={} ui={:?} state=unknown",
-                        ctx.service_name, ctx.ui_mode
+                return emit_unknown_status(
+                    &mut ctx,
+                    ServiceStatusData::podman(
+                        &service_name,
+                        Some(compose_file.clone()),
+                        None,
+                        None,
+                        "unknown",
+                        Vec::new(),
+                        Some(err.to_string()),
                     ),
-                    false,
-                    json!({
-                        "service": ctx.service_name,
-                        "manager": PODMAN_COMPOSE_MANAGER,
-                        "compose_file": compose_file,
-                        "state": "unknown",
-                        "running_containers": Vec::<String>::new(),
-                        "query_error": err.to_string(),
-                    }),
-                    Vec::new(),
                 );
-                if ctx.json {
-                    writeln!(ctx.stdout, "{}", serde_json::to_string_pretty(&out)?)?;
-                } else {
-                    writeln!(ctx.stdout, "[{}] {}: {}", out.ts, out.command, out.message)?;
-                }
-                return Ok(());
             }
         };
         let project = match service
@@ -186,32 +204,18 @@ pub(crate) fn emit_status<W: Write>(ctx: StatusEmitCtx<'_, W>) -> Result<()> {
         {
             Ok(value) => value,
             Err(err) => {
-                let out = output_envelope(
-                    ctx.clock,
-                    "service.status",
-                    "ok",
-                    &format!(
-                        "status target={} ui={:?} state=unknown",
-                        ctx.service_name, ctx.ui_mode
+                return emit_unknown_status(
+                    &mut ctx,
+                    ServiceStatusData::podman(
+                        &service_name,
+                        Some(compose_file.clone()),
+                        compose_override.clone(),
+                        None,
+                        "unknown",
+                        Vec::new(),
+                        Some(err.to_string()),
                     ),
-                    false,
-                    json!({
-                        "service": ctx.service_name,
-                        "manager": PODMAN_COMPOSE_MANAGER,
-                        "compose_file": compose_file,
-                        "compose_override": compose_override,
-                        "state": "unknown",
-                        "running_containers": Vec::<String>::new(),
-                        "query_error": err.to_string(),
-                    }),
-                    Vec::new(),
                 );
-                if ctx.json {
-                    writeln!(ctx.stdout, "{}", serde_json::to_string_pretty(&out)?)?;
-                } else {
-                    writeln!(ctx.stdout, "[{}] {}: {}", out.ts, out.command, out.message)?;
-                }
-                return Ok(());
             }
         };
 
@@ -232,30 +236,16 @@ pub(crate) fn emit_status<W: Write>(ctx: StatusEmitCtx<'_, W>) -> Result<()> {
             "status target={} ui={:?} state={state}",
             ctx.service_name, ctx.ui_mode
         );
-        let data = json!({
-            "service": ctx.service_name,
-            "manager": PODMAN_COMPOSE_MANAGER,
-            "compose_file": compose_file,
-            "compose_override": compose_override,
-            "project": project,
-            "state": state,
-            "running_containers": running_containers,
-            "query_error": query_error,
-        });
-        let out = output_envelope(
-            ctx.clock,
-            "service.status",
-            "ok",
-            &message,
-            false,
-            data,
-            Vec::new(),
+        let status_data = ServiceStatusData::podman(
+            ctx.service_name,
+            Some(compose_file),
+            compose_override,
+            project,
+            state,
+            running_containers,
+            query_error,
         );
-        if ctx.json {
-            writeln!(ctx.stdout, "{}", serde_json::to_string_pretty(&out)?)?;
-        } else {
-            writeln!(ctx.stdout, "[{}] {}: {}", out.ts, out.command, out.message)?;
-        }
+        emit_status_out(&mut ctx, &message, status_data)?;
         return Ok(());
     }
 
@@ -270,6 +260,43 @@ pub(crate) fn emit_status<W: Write>(ctx: StatusEmitCtx<'_, W>) -> Result<()> {
             ctx.service_name, ctx.ui_mode, service.manager
         ),
     )
+}
+
+fn emit_unknown_status<W: Write>(
+    ctx: &mut StatusEmitCtx<'_, W>,
+    status_data: ServiceStatusData,
+) -> Result<()> {
+    emit_status_out(
+        ctx,
+        &format!(
+            "status target={} ui={:?} state=unknown",
+            ctx.service_name, ctx.ui_mode
+        ),
+        status_data,
+    )
+}
+
+fn emit_status_out<W: Write>(
+    ctx: &mut StatusEmitCtx<'_, W>,
+    message: &str,
+    status_data: ServiceStatusData,
+) -> Result<()> {
+    let data = serde_json::to_value(status_data).context("failed to serialize status data")?;
+    let out = output_envelope(
+        ctx.clock,
+        "service.status",
+        "ok",
+        message,
+        false,
+        data,
+        Vec::new(),
+    );
+    if ctx.json {
+        writeln!(ctx.stdout, "{}", serde_json::to_string_pretty(&out)?)?;
+    } else {
+        writeln!(ctx.stdout, "[{}] {}: {}", out.ts, out.command, out.message)?;
+    }
+    Ok(())
 }
 
 pub(crate) fn execute_service_command_from_config(
