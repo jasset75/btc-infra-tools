@@ -1,11 +1,9 @@
 use anyhow::{Context, Result, bail};
 use clap::Parser;
-use infractl_core::config::{BelterConfig, DEFAULT_CONFIG_FILE, default_config_template};
-use infractl_core::env::{EnvResolver, ProcessEnvResolver, expand_placeholders};
-use infractl_core::output::OutputEvent;
-use infractl_core::plan::{ExecutionDetails, ExecutionReport, Plan};
+use infractl_core::config::{DEFAULT_CONFIG_FILE, default_config_template};
+use infractl_core::env::{EnvResolver, ProcessEnvResolver};
 use infractl_core::time::{Clock, SystemClock};
-use infractl_core::usecase::{ServiceAction, ServiceCommandRequest};
+use infractl_core::usecase::ServiceAction;
 use serde_json::json;
 use std::fs;
 use std::io::{self, Write};
@@ -13,16 +11,18 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 mod cli;
+mod commands;
 mod output;
 mod runtime;
 
-use crate::cli::{Cli, Command, ConfigCommand, HealthCommand, RunCommand, ServiceCommand, TuiCommand, UiMode};
-use crate::output::{emit, emit_dry_run_report, error_envelope, output_envelope};
+use crate::cli::{Cli, Command, ConfigCommand, HealthCommand, RunCommand, ServiceCommand, TuiCommand};
+use crate::commands::service::{
+    PlanExecutionResult, StatusEmitCtx, emit_status, execute_service_command_from_config,
+};
+use crate::output::{emit, error_envelope, output_envelope};
 use crate::runtime::{DotenvLoader, ProcessDotenvLoader, RuntimeDeps};
 #[cfg(test)]
 use crate::runtime::NoopDotenvLoader;
-
-const LAUNCHD_MANAGER: &str = "launchd";
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
@@ -240,116 +240,6 @@ fn run<C: Clock, E: EnvResolver, D: DotenvLoader, O: Write>(
     }
 }
 
-struct StatusEmitCtx<'a, W: Write> {
-    clock: &'a dyn Clock,
-    stdout: &'a mut W,
-    json: bool,
-    dry_run: bool,
-    config_path: &'a PathBuf,
-    env_resolver: &'a dyn EnvResolver,
-    service_name: &'a str,
-    ui_mode: UiMode,
-}
-
-fn emit_status<W: Write>(ctx: StatusEmitCtx<'_, W>) -> Result<()> {
-    let raw = fs::read_to_string(ctx.config_path)
-        .with_context(|| format!("failed to read config file {}", ctx.config_path.display()))?;
-    let config: BelterConfig = toml::from_str(&raw).with_context(|| {
-        format!(
-            "failed to parse TOML from {}",
-            ctx.config_path.display()
-        )
-    })?;
-
-    let services = config
-        .service
-        .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("missing [service] section"))?;
-    let service = services
-        .get(ctx.service_name)
-        .ok_or_else(|| anyhow::anyhow!("service `{}` not found in config", ctx.service_name))?;
-
-    if ctx.dry_run {
-        let out = output_envelope(
-            ctx.clock,
-            "service.status",
-            "ok",
-            &format!(
-                "would query status target={} ui={:?}",
-                ctx.service_name, ctx.ui_mode
-            ),
-            true,
-            json!({
-                "service": ctx.service_name,
-                "manager": service.manager,
-                "simulated": true,
-            }),
-            Vec::new(),
-        );
-        if ctx.json {
-            writeln!(ctx.stdout, "{}", serde_json::to_string_pretty(&out)?)?;
-        } else {
-            writeln!(ctx.stdout, "[{}] {}: {}", out.ts, out.command, out.message)?;
-            emit_dry_run_report(ctx.stdout, &out)?;
-        }
-        return Ok(());
-    }
-
-    if service.manager == LAUNCHD_MANAGER {
-        let unit_tmpl = service
-            .unit
-            .as_deref()
-            .ok_or_else(|| anyhow::anyhow!("service `{}` is missing `unit`", ctx.service_name))?;
-        let unit = expand_placeholders(unit_tmpl, ctx.env_resolver)?;
-        let (state, pid, query_error) =
-            match infractl_adapters::LaunchdAdapter.unit_pid_for_status(&unit) {
-            Ok(pid) => {
-                let state = if pid.is_some() { "running" } else { "stopped" };
-                (state, pid, None)
-            }
-            Err(err) => ("unknown", None, Some(err.to_string())),
-        };
-        let message = format!(
-            "status target={} ui={:?} state={state}",
-            ctx.service_name, ctx.ui_mode
-        );
-        let data = json!({
-            "service": ctx.service_name,
-            "manager": LAUNCHD_MANAGER,
-            "unit": unit,
-            "state": state,
-            "pid": pid,
-            "query_error": query_error,
-        });
-        let out = output_envelope(
-            ctx.clock,
-            "service.status",
-            "ok",
-            &message,
-            false,
-            data,
-            Vec::new(),
-        );
-        if ctx.json {
-            writeln!(ctx.stdout, "{}", serde_json::to_string_pretty(&out)?)?;
-        } else {
-            writeln!(ctx.stdout, "[{}] {}: {}", out.ts, out.command, out.message)?;
-        }
-        return Ok(());
-    }
-
-    emit(
-        ctx.clock,
-        ctx.stdout,
-        ctx.json,
-        false,
-        "service.status",
-        &format!(
-            "status target={} ui={:?} manager={} (real status not implemented)",
-            ctx.service_name, ctx.ui_mode, service.manager
-        ),
-    )
-}
 
 fn emit_plan<W: Write>(
     clock: &dyn Clock,
@@ -443,100 +333,6 @@ fn init_config_file(path: &PathBuf, force: bool) -> Result<()> {
     fs::write(path, default_config_template())
         .with_context(|| format!("failed to write config file {}", path.display()))?;
     Ok(())
-}
-
-fn execute_service_command_from_config(
-    env_resolver: &dyn EnvResolver,
-    config_path: &PathBuf,
-    service_name: &str,
-    action: ServiceAction,
-    dry_run: bool,
-) -> Result<PlanExecutionResult> {
-    let raw = fs::read_to_string(config_path)
-        .with_context(|| format!("failed to read config file {}", config_path.display()))?;
-    let config: BelterConfig = toml::from_str(&raw)
-        .with_context(|| format!("failed to parse TOML from {}", config_path.display()))?;
-
-    let req = ServiceCommandRequest {
-        config: &config,
-        service_name,
-        action,
-    };
-
-    let plan = req.plan(env_resolver)?;
-
-    use infractl_core::plan::Executor;
-
-    if dry_run {
-        let mut executor = infractl_adapters::executor::DryRunExecutor::sink();
-        executor.execute(&plan)?;
-        Ok(PlanExecutionResult {
-            plan,
-            message: format!("would {} service `{service_name}`", action_label(action)),
-            execution_report: Vec::new(),
-            events: Vec::new(),
-        })
-    } else {
-        let mut executor = infractl_adapters::executor::RealExecutor::new();
-        let execution_report = executor.execute(&plan)?;
-        Ok(PlanExecutionResult {
-            plan,
-            message: execution_message(service_name, action, &execution_report),
-            execution_report,
-            events: Vec::new(),
-        })
-    }
-}
-
-struct PlanExecutionResult {
-    plan: Plan,
-    message: String,
-    execution_report: Vec<ExecutionReport>,
-    events: Vec<OutputEvent>,
-}
-
-fn execution_message(
-    service_name: &str,
-    action: ServiceAction,
-    execution_report: &[ExecutionReport],
-) -> String {
-    let base = match action {
-        ServiceAction::Start => format!("started service `{service_name}`"),
-        ServiceAction::Stop => format!("stopped service `{service_name}`"),
-        ServiceAction::Restart => format!("restart requested for service `{service_name}`"),
-    };
-
-    if let Some((pid_before, pid_after)) = execution_report.iter().map(|report| {
-        match &report.details {
-            ExecutionDetails::LaunchdRestartPidChange {
-                pid_before,
-                pid_after,
-                ..
-            } => (*pid_before, *pid_after),
-        }
-    }).next() {
-        let restart_observed = matches!((pid_before, pid_after), (Some(before), Some(after)) if before != after);
-        return format!(
-            "{base} (restart observed: {}, pid before: {}, pid after: {})",
-            if restart_observed { "yes" } else { "no" },
-            pid_before
-                .map(|pid| pid.to_string())
-                .unwrap_or_else(|| "unknown".to_string()),
-            pid_after
-                .map(|pid| pid.to_string())
-                .unwrap_or_else(|| "unknown".to_string())
-        );
-    }
-
-    base
-}
-
-fn action_label(action: ServiceAction) -> &'static str {
-    match action {
-        ServiceAction::Start => "start",
-        ServiceAction::Stop => "stop",
-        ServiceAction::Restart => "restart",
-    }
 }
 
 #[cfg(test)]
