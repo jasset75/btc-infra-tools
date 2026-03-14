@@ -134,3 +134,33 @@ impl UiArgs {
         }
     }
 }
+
+impl Command {
+    pub(crate) fn label(&self) -> &'static str {
+        match self {
+            Command::Config { command } => match command {
+                ConfigCommand::Init { .. } => "config.init",
+                ConfigCommand::Validate => "config.validate",
+                ConfigCommand::Show => "config.show",
+            },
+            Command::Service { command } => match command {
+                ServiceCommand::List => "service.list",
+                ServiceCommand::Status { .. } => "service.status",
+                ServiceCommand::Start { .. } => "service.start",
+                ServiceCommand::Stop { .. } => "service.stop",
+                ServiceCommand::Restart { .. } => "service.restart",
+                ServiceCommand::Logs { .. } => "service.logs",
+            },
+            Command::Health { command } => match command {
+                HealthCommand::Check { .. } => "health.check",
+                HealthCommand::Snapshot => "health.snapshot",
+            },
+            Command::Run { command } => match command {
+                RunCommand::Action { .. } => "run.action",
+            },
+            Command::Tui { command } => match command {
+                TuiCommand::Dashboard => "tui.dashboard",
+            },
+        }
+    }
+}

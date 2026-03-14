@@ -1,11 +1,9 @@
-use anyhow::{Context, Result, bail};
+use anyhow::Result;
 use clap::Parser;
-use infractl_core::config::{DEFAULT_CONFIG_FILE, default_config_template};
+use infractl_core::config::DEFAULT_CONFIG_FILE;
 use infractl_core::env::{EnvResolver, ProcessEnvResolver};
 use infractl_core::time::{Clock, SystemClock};
 use infractl_core::usecase::ServiceAction;
-use serde_json::json;
-use std::fs;
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -16,10 +14,13 @@ mod output;
 mod runtime;
 
 use crate::cli::{Cli, Command, ConfigCommand, HealthCommand, RunCommand, ServiceCommand, TuiCommand};
+use crate::commands::config::init_config_file;
 use crate::commands::service::{
-    PlanExecutionResult, StatusEmitCtx, emit_status, execute_service_command_from_config,
+    StatusEmitCtx, emit_plan, emit_status, execute_service_command_from_config,
 };
-use crate::output::{emit, error_envelope, output_envelope};
+use crate::output::{emit, error_envelope};
+#[cfg(test)]
+use crate::output::output_envelope;
 use crate::runtime::{DotenvLoader, ProcessDotenvLoader, RuntimeDeps};
 #[cfg(test)]
 use crate::runtime::NoopDotenvLoader;
@@ -49,7 +50,7 @@ fn run_cli<C: Clock, E: EnvResolver, D: DotenvLoader, O: Write, Er: Write>(
             if cli.json {
                 let out = error_envelope(
                     &deps.clock,
-                    command_label(&cli.command),
+                    cli.command.label(),
                     &error.to_string(),
                     cli.dry_run,
                 );
@@ -240,101 +241,6 @@ fn run<C: Clock, E: EnvResolver, D: DotenvLoader, O: Write>(
     }
 }
 
-
-fn emit_plan<W: Write>(
-    clock: &dyn Clock,
-    stdout: &mut W,
-    json: bool,
-    dry_run: bool,
-    command: &str,
-    result: Result<PlanExecutionResult>,
-) -> Result<()> {
-    match result {
-        Ok(plan_result) => {
-            let out = output_envelope(
-                clock,
-                command,
-                "ok",
-                &plan_result.message,
-                dry_run,
-                json!({
-                    "plan": plan_result.plan,
-                    "execution_report": plan_result.execution_report,
-                }),
-                plan_result.events,
-            );
-            if json {
-                writeln!(stdout, "{}", serde_json::to_string_pretty(&out)?)?;
-            } else {
-                writeln!(stdout, "[{}] {}: {}", out.ts, out.command, out.message)?;
-                if dry_run {
-                    let report = json!({
-                        "command": out.command,
-                        "status": out.status,
-                        "message": out.message,
-                        "dry_run": out.dry_run,
-                        "data": out.data,
-                    });
-                    writeln!(stdout, "[DRY-RUN] Report:")?;
-                    writeln!(stdout, "{}", serde_json::to_string_pretty(&report)?)?;
-                }
-            }
-            Ok(())
-        }
-        Err(e) => {
-            bail!(e);
-        }
-    }
-}
-
-fn command_label(command: &Command) -> &'static str {
-    match command {
-        Command::Config { command } => match command {
-            ConfigCommand::Init { .. } => "config.init",
-            ConfigCommand::Validate => "config.validate",
-            ConfigCommand::Show => "config.show",
-        },
-        Command::Service { command } => match command {
-            ServiceCommand::List => "service.list",
-            ServiceCommand::Status { .. } => "service.status",
-            ServiceCommand::Start { .. } => "service.start",
-            ServiceCommand::Stop { .. } => "service.stop",
-            ServiceCommand::Restart { .. } => "service.restart",
-            ServiceCommand::Logs { .. } => "service.logs",
-        },
-        Command::Health { command } => match command {
-            HealthCommand::Check { .. } => "health.check",
-            HealthCommand::Snapshot => "health.snapshot",
-        },
-        Command::Run { command } => match command {
-            RunCommand::Action { .. } => "run.action",
-        },
-        Command::Tui { command } => match command {
-            TuiCommand::Dashboard => "tui.dashboard",
-        },
-    }
-}
-
-fn init_config_file(path: &PathBuf, force: bool) -> Result<()> {
-    if path.exists() && !force {
-        bail!(
-            "config file already exists at {} (use --force to overwrite)",
-            path.display()
-        );
-    }
-
-    if let Some(parent) = path.parent()
-        && !parent.as_os_str().is_empty()
-    {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create directory {}", parent.display()))?;
-    }
-
-    fs::write(path, default_config_template())
-        .with_context(|| format!("failed to write config file {}", path.display()))?;
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -478,7 +384,7 @@ manager = "launchd"
             Err(error) => {
                 let out = error_envelope(
                     &deps.clock,
-                    command_label(&cli.command),
+                    cli.command.label(),
                     &error.to_string(),
                     cli.dry_run,
                 );

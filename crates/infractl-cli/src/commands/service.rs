@@ -1,6 +1,6 @@
 use crate::cli::UiMode;
 use crate::output::{emit, emit_dry_run_report, output_envelope};
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use infractl_core::config::BelterConfig;
 use infractl_core::env::{EnvResolver, expand_placeholders};
 use infractl_core::output::OutputEvent;
@@ -169,6 +169,44 @@ pub(crate) struct PlanExecutionResult {
     pub(crate) message: String,
     pub(crate) execution_report: Vec<ExecutionReport>,
     pub(crate) events: Vec<OutputEvent>,
+}
+
+pub(crate) fn emit_plan<W: Write>(
+    clock: &dyn Clock,
+    stdout: &mut W,
+    json: bool,
+    dry_run: bool,
+    command: &str,
+    result: Result<PlanExecutionResult>,
+) -> Result<()> {
+    match result {
+        Ok(plan_result) => {
+            let out = output_envelope(
+                clock,
+                command,
+                "ok",
+                &plan_result.message,
+                dry_run,
+                json!({
+                    "plan": plan_result.plan,
+                    "execution_report": plan_result.execution_report,
+                }),
+                plan_result.events,
+            );
+            if json {
+                writeln!(stdout, "{}", serde_json::to_string_pretty(&out)?)?;
+            } else {
+                writeln!(stdout, "[{}] {}: {}", out.ts, out.command, out.message)?;
+                if dry_run {
+                    emit_dry_run_report(stdout, &out)?;
+                }
+            }
+            Ok(())
+        }
+        Err(e) => {
+            bail!(e);
+        }
+    }
 }
 
 fn execution_message(
