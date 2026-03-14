@@ -2,21 +2,22 @@ use anyhow::{Context, Result, bail};
 use clap::Parser;
 use infractl_core::config::{BelterConfig, DEFAULT_CONFIG_FILE, default_config_template};
 use infractl_core::env::{EnvResolver, ProcessEnvResolver, expand_placeholders};
-use infractl_core::output::{OutputEnvelope, OutputEvent};
+use infractl_core::output::OutputEvent;
 use infractl_core::plan::{ExecutionDetails, ExecutionReport, Plan};
 use infractl_core::time::{Clock, SystemClock};
 use infractl_core::usecase::{ServiceAction, ServiceCommandRequest};
-use serde::Serialize;
-use serde_json::{Value, json};
+use serde_json::json;
 use std::fs;
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 mod cli;
+mod output;
 mod runtime;
 
 use crate::cli::{Cli, Command, ConfigCommand, HealthCommand, RunCommand, ServiceCommand, TuiCommand, UiMode};
+use crate::output::{emit, emit_dry_run_report, error_envelope, output_envelope};
 use crate::runtime::{DotenvLoader, ProcessDotenvLoader, RuntimeDeps};
 #[cfg(test)]
 use crate::runtime::NoopDotenvLoader;
@@ -250,25 +251,6 @@ struct StatusEmitCtx<'a, W: Write> {
     ui_mode: UiMode,
 }
 
-#[derive(Serialize)]
-struct DryRunTextReport<'a> {
-    command: &'a str,
-    status: &'a str,
-    message: &'a str,
-    dry_run: bool,
-    data: &'a Value,
-}
-
-fn dry_run_text_report(out: &OutputEnvelope) -> DryRunTextReport<'_> {
-    DryRunTextReport {
-        command: &out.command,
-        status: &out.status,
-        message: &out.message,
-        dry_run: out.dry_run,
-        data: &out.data,
-    }
-}
-
 fn emit_status<W: Write>(ctx: StatusEmitCtx<'_, W>) -> Result<()> {
     let raw = fs::read_to_string(ctx.config_path)
         .with_context(|| format!("failed to read config file {}", ctx.config_path.display()))?;
@@ -308,12 +290,7 @@ fn emit_status<W: Write>(ctx: StatusEmitCtx<'_, W>) -> Result<()> {
             writeln!(ctx.stdout, "{}", serde_json::to_string_pretty(&out)?)?;
         } else {
             writeln!(ctx.stdout, "[{}] {}: {}", out.ts, out.command, out.message)?;
-            writeln!(ctx.stdout, "[DRY-RUN] Report:")?;
-            writeln!(
-                ctx.stdout,
-                "{}",
-                serde_json::to_string_pretty(&dry_run_text_report(&out))?
-            )?;
+            emit_dry_run_report(ctx.stdout, &out)?;
         }
         return Ok(());
     }
@@ -371,56 +348,6 @@ fn emit_status<W: Write>(ctx: StatusEmitCtx<'_, W>) -> Result<()> {
             "status target={} ui={:?} manager={} (real status not implemented)",
             ctx.service_name, ctx.ui_mode, service.manager
         ),
-    )
-}
-
-fn emit<W: Write>(
-    clock: &dyn Clock,
-    stdout: &mut W,
-    json: bool,
-    dry_run: bool,
-    command: &str,
-    message: &str,
-) -> Result<()> {
-    let out = output_envelope(clock, command, "ok", message, dry_run, Value::Null, Vec::new());
-
-    if json {
-        writeln!(stdout, "{}", serde_json::to_string_pretty(&out)?)?;
-    } else {
-        writeln!(stdout, "[{}] {}: {}", out.ts, out.command, out.message)?;
-    }
-    Ok(())
-}
-
-fn output_envelope(
-    clock: &dyn Clock,
-    command: &str,
-    status: &str,
-    message: &str,
-    dry_run: bool,
-    data: Value,
-    events: Vec<OutputEvent>,
-) -> OutputEnvelope {
-    OutputEnvelope {
-        ts: clock.now_utc_rfc3339(),
-        command: command.to_string(),
-        status: status.to_string(),
-        message: message.to_string(),
-        dry_run,
-        data,
-        events,
-    }
-}
-
-fn error_envelope(clock: &dyn Clock, command: &str, message: &str, dry_run: bool) -> OutputEnvelope {
-    output_envelope(
-        clock,
-        command,
-        "error",
-        message,
-        dry_run,
-        Value::Null,
-        Vec::new(),
     )
 }
 
@@ -617,6 +544,7 @@ mod tests {
     use super::*;
     use infractl_core::env::FixedEnvResolver;
     use infractl_core::time::FixedClock;
+    use serde_json::Value;
     use std::collections::HashMap;
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
