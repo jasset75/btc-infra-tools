@@ -211,12 +211,27 @@ unit = "${SERVICE_UNIT}""#
 
 #[cfg(test)]
 mod tests {
-    use super::validate_config_file;
+    use super::{init_config_file, validate_config_file};
     use infractl_core::env::FixedEnvResolver;
     use std::collections::HashMap;
     use std::fs;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn init_config_writes_stratum_service_template() {
+        let dir = unique_fixture_dir();
+        fs::create_dir_all(&dir).expect("fixture dir should be created");
+        let path = dir.join("belter.toml");
+
+        init_config_file(&path, false).expect("config init should succeed");
+
+        let content = fs::read_to_string(&path).expect("config file should be readable");
+        assert!(content.contains("[service.stratum]"));
+        assert!(content.contains("unit = \"${STRATUM_LAUNCHD_UNIT}\""));
+
+        fs::remove_dir_all(&dir).expect("fixture dir should be removed");
+    }
 
     #[test]
     fn validate_config_file_accepts_required_services_with_resolved_placeholders() {

@@ -4,9 +4,10 @@ This file tracks planned work only.
 When a feature is implemented, move it to `CHANGELOG.md` under `Unreleased`.
 
 ## In Progress
-- [ ] Implement real `service logs <name>`
+- [ ] (none)
 
 ## Planned (Next Release)
+- [ ] Implement real `service logs <name>`
 - [ ] Implement real `config show`
 - [ ] Replace static `service list` with config-driven discovery
 - [ ] Implement `service status` for all services (`service status` without `name`)
@@ -16,9 +17,7 @@ When a feature is implemented, move it to `CHANGELOG.md` under `Unreleased`.
 - [ ] Implement functional `tui dashboard`
 
 ## Planned (Future)
-- [ ] Add `stratum` (public pool) service contract in config
 - [ ] Add `stratum` defaults/placeholders to `config init`
-- [ ] Add `service start|stop|restart stratum`
 - [ ] Add `service status stratum`
 - [ ] Add `service logs stratum` (`--follow` and non-follow)
 - [ ] Add `stratum` health checks
@@ -30,4 +29,6 @@ When a feature is implemented, move it to `CHANGELOG.md` under `Unreleased`.
 - [ ] TUI dashboard scope and interaction model (operational MVP)
 
 ## Done
+- [x] Add `stratum` (public pool) service contract in config
 - [x] Implement real `config validate`
+- [x] Add `service start|stop|restart stratum`

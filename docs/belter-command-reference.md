@@ -192,6 +192,14 @@ belter --config belter.toml service restart mempool
 belter --config belter.toml --dry-run --json service start mempool
 ```
 
+Example for `stratum` (launchd-backed):
+
+```bash
+belter --config belter.toml service start stratum
+belter --config belter.toml service stop stratum
+belter --config belter.toml --dry-run --json service restart stratum
+```
+
 ### `service logs <name>`
 - Parameters:
   - `name` (required)

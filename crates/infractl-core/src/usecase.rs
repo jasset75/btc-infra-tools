@@ -197,6 +197,67 @@ mod tests {
     }
 
     #[test]
+    fn stratum_launchd_actions_generate_expected_operations() {
+        let mut services = HashMap::new();
+        services.insert(
+            "stratum".to_string(),
+            ServiceConfig {
+                manager: "launchd".to_string(),
+                unit: Some("${STRATUM_LAUNCHD_UNIT}".to_string()),
+                compose_file: None,
+                compose_override: None,
+                project: None,
+            },
+        );
+        let config = BelterConfig {
+            service: Some(services),
+        };
+        let resolver = FixedEnvResolver::new(HashMap::from([(
+            "STRATUM_LAUNCHD_UNIT".to_string(),
+            "system/io.btc.public-pool".to_string(),
+        )]));
+
+        let start_req = ServiceCommandRequest {
+            config: &config,
+            service_name: "stratum",
+            action: ServiceAction::Start,
+        };
+        let stop_req = ServiceCommandRequest {
+            config: &config,
+            service_name: "stratum",
+            action: ServiceAction::Stop,
+        };
+        let restart_req = ServiceCommandRequest {
+            config: &config,
+            service_name: "stratum",
+            action: ServiceAction::Restart,
+        };
+
+        let start_plan = start_req.plan(&resolver).expect("start plan");
+        let stop_plan = stop_req.plan(&resolver).expect("stop plan");
+        let restart_plan = restart_req.plan(&resolver).expect("restart plan");
+
+        assert_eq!(
+            start_plan.operations,
+            vec![Operation::StartLaunchdService {
+                unit: "system/io.btc.public-pool".to_string()
+            }]
+        );
+        assert_eq!(
+            stop_plan.operations,
+            vec![Operation::StopLaunchdService {
+                unit: "system/io.btc.public-pool".to_string()
+            }]
+        );
+        assert_eq!(
+            restart_plan.operations,
+            vec![Operation::RestartLaunchdService {
+                unit: "system/io.btc.public-pool".to_string()
+            }]
+        );
+    }
+
+    #[test]
     fn request_rejects_missing_service_section() {
         let config = BelterConfig { service: None };
         let req = ServiceCommandRequest {
