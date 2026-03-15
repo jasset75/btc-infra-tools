@@ -25,6 +25,7 @@ When a feature is implemented, move it to `CHANGELOG.md` under `Unreleased`.
 - [ ] Add `stratum` health checks
 - [ ] Add integration tests for `stratum` lifecycle/status/logs/errors
 - [ ] Document `stratum` setup and operations
+- [ ] Add `Bitcoin Peer Tier List (Score)` feature (tiered peer scoring report + disconnect candidate suggestions + low-impact node sampling)
 
 ## Exploring
 - [ ] TUI dashboard scope and interaction model (operational MVP)
