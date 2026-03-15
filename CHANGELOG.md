@@ -6,9 +6,7 @@ The project follows semantic versioning.
 
 ## [Unreleased]
 
-### Planned Process
-- Add new features through the live-cycle: develop -> validate -> document -> release.
-- Record each delivered feature in this changelog before release.
+This section includes implemented changes that are not released yet.
 
 ### Added
 - Implemented `service restart <name>` for services configured with `manager = "launchd"`.
@@ -27,7 +25,6 @@ The project follows semantic versioning.
   - insufficient privileges for `system/...` units (use elevated execution)
 - Added structured JSON error envelope output for CLI failures and explicit non-zero process exit code handling.
 - Added `just install` smoke check (`belter --version`) to fail fast if the installed binary is not executable in the current environment.
-- Added CLI integration test suite (`crates/infractl-cli/tests/cli_test.rs`) using `CARGO_BIN_EXE_belter` to validate dry-run and JSON error envelope flows without nested `cargo run`.
 - Added `just` as the project task runner with recipes for `build`, `install`, `check`, `clippy`, `clippy-fix`, and `test`.
 - Added real `service status <name>` support for `manager = "podman_compose"`:
   - resolves compose placeholders from env

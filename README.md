@@ -6,6 +6,7 @@ Monorepo for `belter`, a Rust CLI/TUI for infrastructure operations.
 - Design decisions and initial scope: [Architecture](docs/architecture.md)
 - Current implemented architecture (with runtime flow): [Architecture (Current)](docs/architecture-btc-infra-tools.md)
 - Feature and release history: [CHANGELOG](CHANGELOG.md)
+- Planned work and upcoming features: [ROADMAP](ROADMAP.md)
 
 ## Workspace Layout
 - `crates/infractl-core`: config/output/time primitives
