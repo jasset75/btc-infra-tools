@@ -126,7 +126,11 @@ belter
 - Behavior:
   - Loads `service.<name>` from config when `name` is provided.
   - `launchd` services: resolves `unit`, queries runtime status via `launchctl print`, and reports state in `data` (`running|stopped|unknown`) with optional `pid`.
-  - Non-`launchd` services currently return a descriptive scaffold message indicating real status is not yet implemented.
+  - `podman_compose` services: resolves `compose_file`/`compose_override`/`project`, queries runtime status via `podman compose ... ps -q`, and reports:
+    - `data.state = running|stopped|unknown`
+    - `data.running_containers` (container ids when available)
+    - `data.query_error` when runtime query cannot be completed.
+  - Unknown/unsupported managers return `state=unknown` with descriptive message.
   - `--dry-run`: does not query runtime state; returns a simulated status payload (`data.simulated = true`) and sets `dry_run = true` in the envelope.
   - `--json`: returns machine-readable envelope; command-level `status` indicates CLI execution success, while service runtime state is exposed in `data.state` when available.
 
