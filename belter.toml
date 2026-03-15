@@ -18,3 +18,8 @@ id = "example_http_health"
 type = "http"
 url = "http://${MEMPOOL_HOST}:${MEMPOOL_PORT}/api/v1/backend-info"
 expect = "status == 200"
+
+[service.stratum]
+manager = "launchd"
+unit = "${STRATUM_LAUNCHD_UNIT}"
+

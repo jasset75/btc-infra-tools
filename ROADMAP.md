@@ -7,7 +7,6 @@ When a feature is implemented, move it to `CHANGELOG.md` under `Unreleased`.
 - [ ] Implement real `service logs <name>`
 
 ## Planned (Next Release)
-- [ ] Implement real `config validate`
 - [ ] Implement real `config show`
 - [ ] Replace static `service list` with config-driven discovery
 - [ ] Implement `service status` for all services (`service status` without `name`)
@@ -29,3 +28,6 @@ When a feature is implemented, move it to `CHANGELOG.md` under `Unreleased`.
 
 ## Exploring
 - [ ] TUI dashboard scope and interaction model (operational MVP)
+
+## Done
+- [x] Implement real `config validate`

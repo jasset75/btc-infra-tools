@@ -9,6 +9,12 @@ The project follows semantic versioning.
 This section includes implemented changes that are not released yet.
 
 ### Added
+- Added real `config validate` implementation:
+  - validates that required services (`bitcoind`, `stratum`, `mempool`) exist in config,
+  - validates manager-specific required fields (`unit` for `launchd`, `compose_file` for `podman_compose`),
+  - validates `${ENV_VAR}` placeholder resolution using current environment (including auto-loaded `.env`),
+  - returns actionable errors with missing config examples and missing env variable names.
+- Added `belter config validate --write-missing` to append missing required service blocks to `belter.toml` before validation.
 - Implemented `service restart <name>` for services configured with `manager = "launchd"`.
 - Added config-driven restart flow:
   - load `service.<name>` from `belter.toml`

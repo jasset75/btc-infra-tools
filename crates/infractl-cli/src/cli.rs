@@ -59,7 +59,10 @@ pub(crate) enum ConfigCommand {
         #[arg(long, help = "Overwrite target file if it already exists")]
         force: bool,
     },
-    Validate,
+    Validate {
+        #[arg(long, help = "Append missing required service blocks to config before validating")]
+        write_missing: bool,
+    },
     Show,
 }
 
@@ -140,7 +143,7 @@ impl Command {
         match self {
             Command::Config { command } => match command {
                 ConfigCommand::Init { .. } => "config.init",
-                ConfigCommand::Validate => "config.validate",
+                ConfigCommand::Validate { .. } => "config.validate",
                 ConfigCommand::Show => "config.show",
             },
             Command::Service { command } => match command {

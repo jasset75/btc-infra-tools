@@ -14,7 +14,7 @@ mod output;
 mod runtime;
 
 use crate::cli::{Cli, Command, ConfigCommand, HealthCommand, RunCommand, ServiceCommand, TuiCommand};
-use crate::commands::config::init_config_file;
+use crate::commands::config::{init_config_file, validate_config_file};
 use crate::commands::service::{
     StatusEmitCtx, emit_plan, emit_status, execute_service_command_from_config,
 };
@@ -97,14 +97,18 @@ fn run<C: Clock, E: EnvResolver, D: DotenvLoader, O: Write>(
                     &format!("created configuration file at {}", target.display()),
                 )
             }
-            ConfigCommand::Validate => emit(
-                &deps.clock,
-                stdout,
-                cli.json,
-                cli.dry_run,
-                "config.validate",
-                "configuration is valid",
-            ),
+            ConfigCommand::Validate { write_missing } => {
+                let message =
+                    validate_config_file(&deps.env_resolver, &cli.config, *write_missing)?;
+                emit(
+                    &deps.clock,
+                    stdout,
+                    cli.json,
+                    cli.dry_run,
+                    "config.validate",
+                    &message,
+                )
+            }
             ConfigCommand::Show => emit(
                 &deps.clock,
                 stdout,
