@@ -103,10 +103,25 @@ belter
   - `--force` (optional)
 - Behavior:
   - Creates a config template (default output path: `belter.toml`).
+  - The default template includes:
+    - `service.bitcoind` (`manager = "launchd"`, `unit = "${BITCOIND_LAUNCHD_UNIT}"`)
+    - `service.stratum` (`manager = "launchd"`, `unit = "${STRATUM_LAUNCHD_UNIT}"`)
+    - `service.mempool` (`manager = "podman_compose"` with compose placeholders)
 
 ### `config validate`
-- Parameters: none
-- Behavior: scaffold success response.
+- Parameters:
+  - `--write-missing` (optional; appends missing required service blocks before validating)
+- Behavior:
+  - Loads and parses `belter.toml`.
+  - Requires service definitions for `bitcoind`, `stratum`, and `mempool`.
+  - Validates required fields by manager:
+    - `launchd`: `unit` required
+    - `podman_compose`: `compose_file` required (`compose_override` and `project` optional)
+  - Resolves `${ENV_VAR}` placeholders against environment (`.env` is auto-loaded at CLI startup when present).
+  - On failure, reports actionable errors:
+    - missing config sections/fields include TOML example snippets,
+    - unresolved placeholders include the exact missing env var name and a suggested `export` command.
+  - `--write-missing` appends only missing required service blocks; existing blocks are not overwritten.
 
 ### `config show`
 - Parameters: none
