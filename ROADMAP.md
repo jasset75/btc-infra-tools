@@ -21,6 +21,9 @@ When a feature is implemented, move it to `CHANGELOG.md` under `Unreleased`.
 - [ ] Add `service status stratum`
 - [ ] Add `service logs stratum` (`--follow` and non-follow)
 - [ ] Add `stratum` health checks
+- [ ] Add `info pool` extended metrics with per-miner/worker visibility
+  - Scope: worker-level hashrate, accepted/rejected shares, connection time, best share, and best-share percentile estimate
+  - Dependencies: define the observability/data source contract first (public-pool API extension or sidecar collector), plus persistence strategy for miner history across process restarts
 - [ ] Add integration tests for `stratum` lifecycle/status/logs/errors
 - [ ] Document `stratum` setup and operations
 - [ ] Add `Bitcoin Peer Tier List (Score)` feature (tiered peer scoring report + disconnect candidate suggestions + low-impact node sampling)
