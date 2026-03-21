@@ -22,6 +22,7 @@ Monorepo for `belter`, a Rust CLI/TUI for infrastructure operations.
 - Detailed command/flag reference: [docs/belter-command-reference.md](docs/belter-command-reference.md)
 - Current features:
   - Config-driven `service start|stop|restart <name>` for `launchd` and `podman_compose`.
+  - `info pool [target]` for read-only public-pool metrics from local or remote hosts.
   - `${ENV_VAR}` expansion in service `unit`.
   - Automatic `.env` loading from current working directory.
   - Actionable launchd restart errors for target format and privilege requirements.
@@ -89,7 +90,10 @@ Smoke test:
 ```bash
 mise exec -- cargo run -p belter -- --help
 mise exec -- cargo run -p belter -- service list
+mise exec -- cargo run -p belter -- info pool
+mise exec -- cargo run -p belter -- info pool 192.0.2.10
 mise exec -- cargo run -p belter -- health snapshot --json
+mise exec -- cargo run -p belter -- health pool 192.0.2.10
 ```
 
 ## Preconditions

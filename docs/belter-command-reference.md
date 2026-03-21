@@ -72,6 +72,22 @@ Example:
 belter --dry-run service restart bitcoind
 ```
 
+## Execution Scope Notation
+
+Command docs use the following scope markers:
+
+- `Scope: local-only`: command must run on the managed host because it touches local process managers, files, or privileged runtime state.
+- `Scope: remote-capable`: command can be run from another machine if network reachability and credentials are sufficient.
+- `Scope: mixed`: command supports both patterns depending on the selected target or backend.
+
+Documentation examples use reserved example addresses such as `192.0.2.10` and `pool.example.internal`, not real operator IPs.
+
+Semantic guidance:
+
+- `info`: read-only descriptive data and operator-facing metrics.
+- `health`: checks and health-oriented probes; may evolve toward explicit readiness/liveness semantics.
+- `service`: local control-plane actions over managed services.
+
 ## Command Tree
 ```text
 belter
@@ -79,6 +95,8 @@ belter
     init [--path <PATH>] [--force]
     validate
     show
+  info
+    pool [target] [--port <PORT> | --url <URL>]
   service
     list
     status [name] [--ui <auto|cli|tui> | --tui]
@@ -89,6 +107,7 @@ belter
   health
     check [--all | --id <ID>] [--ui <auto|cli|tui> | --tui]
     snapshot
+    pool [target] [--port <PORT> | --url <URL>]
   run
     action <id> [--dry-run]
   tui
@@ -127,6 +146,36 @@ belter
 - Parameters: none
 - Behavior: scaffold placeholder response.
 
+## info
+
+### `info pool`
+- Scope: `remote-capable`
+- Parameters:
+  - `target` (optional; host or IP, default: `127.0.0.1`)
+  - `--port <PORT>` (optional; default: `3334`)
+  - `--url <URL>` (optional; advanced override, mutually exclusive with `target`)
+- Behavior:
+  - By default, builds `http://<target>:<port>/api/info`.
+  - Queries the `public-pool` `/api/info` endpoint.
+  - Text mode prints a compact single-line mining summary:
+    - `best_share` formatted with metric suffixes (`K`, `M`, `G`, `T`)
+    - miner / user agent
+    - hashrate in `TH/s`
+    - high-score update timestamp
+    - process uptime timestamp
+  - `--json`: returns a structured envelope with raw numeric fields and human-readable display fields.
+  - `--dry-run`: does not perform the HTTP request; returns a simulated payload.
+
+Example:
+
+```bash
+belter info pool
+belter info pool 192.0.2.10
+belter info pool pool.example.internal --port 3334
+belter --json info pool
+belter info pool --url http://192.0.2.10:3334/api/info
+```
+
 ## service
 
 ### `service list`
@@ -134,6 +183,7 @@ belter
 - Behavior: scaffold static list.
 
 ### `service status [name]`
+- Scope: `local-only`
 - Parameters:
   - `name` (optional, default: all)
   - `--ui <auto|cli|tui>` (optional)
@@ -150,6 +200,7 @@ belter
   - `--json`: returns machine-readable envelope; command-level `status` indicates CLI execution success, while service runtime state is exposed in `data.state` when available.
 
 ### `service start <name>`
+- Scope: `local-only`
 - Parameters:
   - `name` (required)
 - Behavior:
@@ -160,6 +211,7 @@ belter
   - `--json`: returns machine-readable envelope including `plan`; dry-run preview events are omitted.
 
 ### `service stop <name>`
+- Scope: `local-only`
 - Parameters:
   - `name` (required)
 - Behavior:
@@ -170,6 +222,7 @@ belter
   - `--json`: returns machine-readable envelope including `plan`; dry-run preview events are omitted.
 
 ### `service restart <name>`
+- Scope: `local-only`
 - Parameters:
   - `name` (required)
 - Behavior:
@@ -201,6 +254,7 @@ belter --config belter.toml --dry-run --json service restart stratum
 ```
 
 ### `service logs <name>`
+- Scope: `local-only`
 - Parameters:
   - `name` (required)
   - `--follow` (optional)
@@ -209,6 +263,7 @@ belter --config belter.toml --dry-run --json service restart stratum
 ## health
 
 ### `health check`
+- Scope: `mixed`
 - Parameters:
   - `--all` (optional; mutually exclusive with `--id`)
   - `--id <ID>` (optional; mutually exclusive with `--all`)
@@ -218,8 +273,26 @@ belter --config belter.toml --dry-run --json service restart stratum
   - Current implementation: no output behavior change yet; mode is reported in output.
 
 ### `health snapshot`
+- Scope: `local-only`
 - Parameters: none
 - Behavior: scaffold snapshot response.
+
+### `health pool`
+- Scope: `remote-capable`
+- Status: compatibility alias for `info pool`
+- Parameters:
+  - `target` (optional; host or IP, default: `127.0.0.1`)
+  - `--port <PORT>` (optional; default: `3334`)
+  - `--url <URL>` (optional; advanced override, mutually exclusive with `target`)
+- Behavior:
+  - Same behavior and output as `info pool`.
+  - Kept as a temporary alias while health-oriented pool checks are designed.
+
+Example:
+
+```bash
+belter health pool 192.0.2.10
+```
 
 ## run
 

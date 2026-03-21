@@ -33,6 +33,10 @@ pub(crate) enum Command {
         #[command(subcommand)]
         command: ConfigCommand,
     },
+    Info {
+        #[command(subcommand)]
+        command: InfoCommand,
+    },
     Service {
         #[command(subcommand)]
         command: ServiceCommand,
@@ -64,6 +68,25 @@ pub(crate) enum ConfigCommand {
         write_missing: bool,
     },
     Show,
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum InfoCommand {
+    Pool(PoolTargetArgs),
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct PoolTargetArgs {
+    #[arg(help = "public-pool host or IP; default is 127.0.0.1")]
+    pub(crate) target: Option<String>,
+    #[arg(long, default_value_t = 3334, help = "public-pool API port")]
+    pub(crate) port: u16,
+    #[arg(
+        long,
+        conflicts_with = "target",
+        help = "public-pool API info endpoint"
+    )]
+    pub(crate) url: Option<String>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -101,6 +124,7 @@ pub(crate) enum HealthCommand {
         ui: UiArgs,
     },
     Snapshot,
+    Pool(PoolTargetArgs),
 }
 
 #[derive(Debug, Subcommand)]
@@ -146,6 +170,9 @@ impl Command {
                 ConfigCommand::Validate { .. } => "config.validate",
                 ConfigCommand::Show => "config.show",
             },
+            Command::Info { command } => match command {
+                InfoCommand::Pool(..) => "info.pool",
+            },
             Command::Service { command } => match command {
                 ServiceCommand::List => "service.list",
                 ServiceCommand::Status { .. } => "service.status",
@@ -157,6 +184,7 @@ impl Command {
             Command::Health { command } => match command {
                 HealthCommand::Check { .. } => "health.check",
                 HealthCommand::Snapshot => "health.snapshot",
+                HealthCommand::Pool(..) => "health.pool",
             },
             Command::Run { command } => match command {
                 RunCommand::Action { .. } => "run.action",

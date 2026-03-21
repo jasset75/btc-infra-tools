@@ -13,8 +13,12 @@ mod commands;
 mod output;
 mod runtime;
 
-use crate::cli::{Cli, Command, ConfigCommand, HealthCommand, RunCommand, ServiceCommand, TuiCommand};
+use crate::cli::{
+    Cli, Command, ConfigCommand, HealthCommand, InfoCommand, RunCommand, ServiceCommand,
+    TuiCommand,
+};
 use crate::commands::config::{init_config_file, validate_config_file};
+use crate::commands::health::{PoolHealthRequest, emit_pool_health};
 use crate::commands::service::{
     StatusEmitCtx, emit_plan, emit_status, execute_service_command_from_config,
 };
@@ -118,6 +122,20 @@ fn run<C: Clock, E: EnvResolver, D: DotenvLoader, O: Write>(
                 "showing effective configuration",
             ),
         },
+        Command::Info { command } => match command {
+            InfoCommand::Pool(args) => emit_pool_health(
+                &deps.clock,
+                stdout,
+                cli.json,
+                cli.dry_run,
+                PoolHealthRequest {
+                    command_label: "info.pool",
+                    target: args.target.as_deref(),
+                    port: args.port,
+                    explicit_url: args.url.as_deref(),
+                },
+            ),
+        },
         Command::Service { command } => match command {
             ServiceCommand::List => emit(
                 &deps.clock,
@@ -216,6 +234,18 @@ fn run<C: Clock, E: EnvResolver, D: DotenvLoader, O: Write>(
                 cli.dry_run,
                 "health.snapshot",
                 "snapshot generated",
+            ),
+            HealthCommand::Pool(args) => emit_pool_health(
+                &deps.clock,
+                stdout,
+                cli.json,
+                cli.dry_run,
+                PoolHealthRequest {
+                    command_label: "health.pool",
+                    target: args.target.as_deref(),
+                    port: args.port,
+                    explicit_url: args.url.as_deref(),
+                },
             ),
         },
         Command::Run { command } => match command {

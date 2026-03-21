@@ -13,3 +13,13 @@ fn test_cli_dry_run_parse() {
 
     assert!(output.status.success());
 }
+
+#[test]
+fn test_cli_info_pool_parse() {
+    let output = Command::new(belter_bin())
+        .args(["--dry-run", "info", "pool", "192.0.2.10"])
+        .output()
+        .expect("failed to execute process");
+
+    assert!(output.status.success());
+}
