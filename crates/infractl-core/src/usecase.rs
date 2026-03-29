@@ -35,6 +35,7 @@ impl<'a> ServiceCommandRequest<'a> {
         let operation = match service.manager.as_str() {
             "launchd" => self.launchd_operation(service, resolver)?,
             "podman_compose" => self.podman_compose_operation(service, resolver)?,
+            "podman_machine" => self.podman_machine_operation(service, resolver)?,
             other => bail!(
                 "service `{}` uses unsupported manager `{other}`",
                 self.service_name
@@ -106,6 +107,24 @@ impl<'a> ServiceCommandRequest<'a> {
             },
         })
     }
+
+    fn podman_machine_operation(
+        &self,
+        service: &ServiceConfig,
+        resolver: &dyn EnvResolver,
+    ) -> Result<Operation> {
+        let machine = service
+            .machine
+            .as_deref()
+            .ok_or_else(|| anyhow!("service `{}` is missing `machine`", self.service_name))?;
+        let machine = expand_placeholders(machine, resolver)?;
+
+        Ok(match self.action {
+            ServiceAction::Start => Operation::StartPodmanMachine { machine },
+            ServiceAction::Stop => Operation::StopPodmanMachine { machine },
+            ServiceAction::Restart => Operation::RestartPodmanMachine { machine },
+        })
+    }
 }
 
 #[cfg(test)]
@@ -124,6 +143,8 @@ mod tests {
                 compose_file: None,
                 compose_override: None,
                 project: None,
+                machine: None,
+                depends_on: None,
             },
         );
         BelterConfig {
@@ -161,6 +182,8 @@ mod tests {
                 compose_file: Some("${MEMPOOL_COMPOSE_FILE}".to_string()),
                 compose_override: Some("${MEMPOOL_COMPOSE_OVERRIDE}".to_string()),
                 project: Some("${MEMPOOL_PROJECT}".to_string()),
+                machine: None,
+                depends_on: None,
             },
         );
         let config = BelterConfig {
@@ -207,6 +230,8 @@ mod tests {
                 compose_file: None,
                 compose_override: None,
                 project: None,
+                machine: None,
+                depends_on: None,
             },
         );
         let config = BelterConfig {
@@ -258,6 +283,45 @@ mod tests {
     }
 
     #[test]
+    fn start_podman_machine_service_request_plan() {
+        let mut services = HashMap::new();
+        services.insert(
+            "podman_runtime".to_string(),
+            ServiceConfig {
+                manager: "podman_machine".to_string(),
+                unit: None,
+                compose_file: None,
+                compose_override: None,
+                project: None,
+                machine: Some("${PODMAN_MACHINE_NAME}".to_string()),
+                depends_on: None,
+            },
+        );
+        let config = BelterConfig {
+            service: Some(services),
+        };
+
+        let resolver = FixedEnvResolver::new(HashMap::from([(
+            "PODMAN_MACHINE_NAME".to_string(),
+            "podman-machine-default".to_string(),
+        )]));
+
+        let req = ServiceCommandRequest {
+            config: &config,
+            service_name: "podman_runtime",
+            action: ServiceAction::Start,
+        };
+
+        let plan = req.plan(&resolver).expect("failed to create plan");
+        assert_eq!(
+            plan.operations,
+            vec![Operation::StartPodmanMachine {
+                machine: "podman-machine-default".to_string()
+            }]
+        );
+    }
+
+    #[test]
     fn request_rejects_missing_service_section() {
         let config = BelterConfig { service: None };
         let req = ServiceCommandRequest {
@@ -301,6 +365,8 @@ mod tests {
                 compose_file: None,
                 compose_override: None,
                 project: None,
+                machine: None,
+                depends_on: None,
             },
         );
         let config = BelterConfig {
@@ -331,6 +397,8 @@ mod tests {
                 compose_file: None,
                 compose_override: None,
                 project: None,
+                machine: None,
+                depends_on: None,
             },
         );
         let config = BelterConfig {
@@ -351,6 +419,38 @@ mod tests {
     }
 
     #[test]
+    fn request_rejects_missing_machine_for_podman_machine() {
+        let mut services = HashMap::new();
+        services.insert(
+            "podman_runtime".to_string(),
+            ServiceConfig {
+                manager: "podman_machine".to_string(),
+                unit: None,
+                compose_file: None,
+                compose_override: None,
+                project: None,
+                machine: None,
+                depends_on: None,
+            },
+        );
+        let config = BelterConfig {
+            service: Some(services),
+        };
+        let req = ServiceCommandRequest {
+            config: &config,
+            service_name: "podman_runtime",
+            action: ServiceAction::Restart,
+        };
+
+        let resolver = FixedEnvResolver::new(HashMap::new());
+        let err = req.plan(&resolver).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("service `podman_runtime` is missing `machine`")
+        );
+    }
+
+    #[test]
     fn request_rejects_unsupported_manager() {
         let mut services = HashMap::new();
         services.insert(
@@ -361,6 +461,8 @@ mod tests {
                 compose_file: None,
                 compose_override: None,
                 project: None,
+                machine: None,
+                depends_on: None,
             },
         );
         let config = BelterConfig {

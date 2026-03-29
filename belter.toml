@@ -12,6 +12,7 @@ compose_file = "${MEMPOOL_COMPOSE_FILE}"
 compose_override = "${MEMPOOL_COMPOSE_OVERRIDE}"
 project = "${MEMPOOL_PROJECT}"
 tags = ["explorer"]
+depends_on = ["bitcoind", "podman_runtime"]
 
 [[check]]
 id = "example_http_health"
@@ -22,4 +23,8 @@ expect = "status == 200"
 [service.stratum]
 manager = "launchd"
 unit = "${STRATUM_LAUNCHD_UNIT}"
+depends_on = ["bitcoind"]
 
+[service.podman_runtime]
+manager = "podman_machine"
+machine = "${PODMAN_MACHINE_NAME}"

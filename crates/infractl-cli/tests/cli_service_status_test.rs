@@ -90,3 +90,20 @@ fn test_cli_status_mempool_json_contains_podman_fields_when_env_present() {
     assert!(stdout.contains("\"compose_file\": \"/tmp/base.yml\""));
     assert!(stdout.contains("\"running_containers\":"));
 }
+
+#[test]
+fn test_cli_status_podman_runtime_json_contains_machine_field_when_env_present() {
+    let output = Command::new(belter_bin())
+        .args(["--json", "service", "status", "podman_runtime"])
+        .current_dir(repo_root())
+        .env("PODMAN_MACHINE_NAME", "podman-machine-default")
+        .output()
+        .expect("failed to execute process");
+
+    assert!(output.status.success());
+
+    let stdout = String::from_utf8(output.stdout).expect("stdout should be utf8");
+    assert!(stdout.contains("\"command\": \"service.status\""));
+    assert!(stdout.contains("\"manager\": \"podman_machine\""));
+    assert!(stdout.contains("\"machine\": \"podman-machine-default\""));
+}

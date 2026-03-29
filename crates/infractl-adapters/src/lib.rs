@@ -1,5 +1,6 @@
 use anyhow::{Result, bail};
 use infractl_core::plan::ExecutionDetails;
+use serde_json::Value;
 use std::process::Command;
 
 pub mod executor;
@@ -205,6 +206,62 @@ impl PodmanComposeAdapter {
         let code = output.status.code();
         bail!(
             "podman compose {action} failed (compose_file={compose_file}, override={compose_override:?}, project={project:?}, status={code:?}, stdout={stdout}, stderr={stderr})"
+        )
+    }
+}
+
+pub struct PodmanMachineAdapter;
+
+impl PodmanMachineAdapter {
+    pub fn is_running(&self, machine: &str) -> Result<bool> {
+        let output = Command::new("podman")
+            .args(["machine", "inspect", machine])
+            .output()?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            let code = output.status.code();
+            bail!(
+                "podman machine status failed (machine={machine}, status={code:?}, stdout={stdout}, stderr={stderr})"
+            );
+        }
+
+        let parsed: Value = serde_json::from_slice(&output.stdout)?;
+        let state = parsed
+            .as_array()
+            .and_then(|items| items.first())
+            .and_then(|item| item.get("State"))
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow::anyhow!("podman machine inspect output missing `State` field"))?;
+
+        Ok(state.eq_ignore_ascii_case("running"))
+    }
+
+    pub fn start(&self, machine: &str) -> Result<()> {
+        self.run_machine(&["machine", "start", machine], machine, "start")
+    }
+
+    pub fn stop(&self, machine: &str) -> Result<()> {
+        self.run_machine(&["machine", "stop", machine], machine, "stop")
+    }
+
+    pub fn restart(&self, machine: &str) -> Result<()> {
+        self.run_machine(&["machine", "stop", machine], machine, "restart")?;
+        self.run_machine(&["machine", "start", machine], machine, "restart")
+    }
+
+    fn run_machine(&self, args: &[&str], machine: &str, action: &str) -> Result<()> {
+        let output = Command::new("podman").args(args).output()?;
+        if output.status.success() {
+            return Ok(());
+        }
+
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let code = output.status.code();
+        bail!(
+            "podman machine {action} failed (machine={machine}, status={code:?}, stdout={stdout}, stderr={stderr})"
         )
     }
 }

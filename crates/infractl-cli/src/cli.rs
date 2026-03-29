@@ -106,6 +106,9 @@ pub(crate) enum ServiceCommand {
     Restart {
         name: String,
     },
+    BringUp {
+        name: String,
+    },
     Logs {
         name: String,
         #[arg(long)]
@@ -179,6 +182,7 @@ impl Command {
                 ServiceCommand::Start { .. } => "service.start",
                 ServiceCommand::Stop { .. } => "service.stop",
                 ServiceCommand::Restart { .. } => "service.restart",
+                ServiceCommand::BringUp { .. } => "service.bring-up",
                 ServiceCommand::Logs { .. } => "service.logs",
             },
             Command::Health { command } => match command {

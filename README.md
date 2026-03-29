@@ -120,14 +120,18 @@ Generated URL example:
 Practical `.env` example for a local `mempool` stack:
 
 ```bash
+PODMAN_MACHINE_NAME=podman-machine-default
 MEMPOOL_HOST=127.0.0.1
 MEMPOOL_PORT=8080
 MEMPOOL_COMPOSE_FILE=$HOME/mempool-local/ops/mempool/config/docker-compose.base.yml
 MEMPOOL_COMPOSE_OVERRIDE=$HOME/mempool-local/ops/mempool/config/docker-compose.override.yml
 MEMPOOL_PROJECT=docker
+BITCOIND_LAUNCHD_UNIT=system/com.bitcoind.node
+STRATUM_LAUNCHD_UNIT=gui/501/io.btc.public-pool
 ```
 
 Placeholder notes for `.env.example`:
+- `<podman_machine_name>`: Podman machine logical name on the host; current expected value is usually `podman-machine-default`.
 - `<mempool_host>`: host where belter reaches the local mempool HTTP API, usually `127.0.0.1`.
 - `<mempool_port>`: published mempool web/API port, usually `8080`.
 - `<path_to_mempool_compose_file>`: absolute path to the base compose file copied from upstream.
@@ -136,6 +140,7 @@ Placeholder notes for `.env.example`:
 - `<path_to_bitcoind_workdir>`: host working directory for the managed Bitcoin Core service, if used.
 - `<path_to_bitcoind_datadir>`: host datadir passed to `bitcoin-cli`, if used.
 - `<launchd_unit_for_bitcoind>`: full launchd target, for example `system/com.bitcoind.node`.
+- `<launchd_unit_for_stratum>`: full launchd target for local `public-pool`, for example `gui/501/io.btc.public-pool`.
 
 ## Development Cycle
 Feature delivery follows this loop:

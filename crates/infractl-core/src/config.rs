@@ -12,9 +12,15 @@ manager = "launchd"
 unit = "${BITCOIND_LAUNCHD_UNIT}"
 tags = ["bitcoin", "core"]
 
+[service.podman_runtime]
+manager = "podman_machine"
+machine = "${PODMAN_MACHINE_NAME}"
+tags = ["runtime", "podman"]
+
 [service.stratum]
 manager = "launchd"
 unit = "${STRATUM_LAUNCHD_UNIT}"
+depends_on = ["bitcoind"]
 tags = ["mining", "stratum"]
 
 [service.mempool]
@@ -22,6 +28,7 @@ manager = "podman_compose"
 compose_file = "${MEMPOOL_COMPOSE_FILE}"
 compose_override = "${MEMPOOL_COMPOSE_OVERRIDE}"
 project = "${MEMPOOL_PROJECT}"
+depends_on = ["bitcoind", "podman_runtime"]
 tags = ["explorer"]
 
 [[check]]
@@ -54,6 +61,8 @@ pub struct ServiceConfig {
     pub compose_file: Option<String>,
     pub compose_override: Option<String>,
     pub project: Option<String>,
+    pub machine: Option<String>,
+    pub depends_on: Option<Vec<String>>,
 }
 
 #[cfg(test)]
@@ -99,5 +108,35 @@ unit = "system/com.bitcoind.node"
 
         assert_eq!(stratum.manager, "launchd");
         assert_eq!(stratum.unit.as_deref(), Some("${STRATUM_LAUNCHD_UNIT}"));
+    }
+
+    #[test]
+    fn default_template_includes_podman_runtime_and_dependencies() {
+        let config: BelterConfig =
+            toml::from_str(super::default_config_template()).expect("template should parse");
+
+        let podman_runtime = config
+            .service_by_name("podman_runtime")
+            .expect("template should include podman_runtime service");
+        let mempool = config
+            .service_by_name("mempool")
+            .expect("template should include mempool service");
+        let stratum = config
+            .service_by_name("stratum")
+            .expect("template should include stratum service");
+
+        assert_eq!(podman_runtime.manager, "podman_machine");
+        assert_eq!(
+            podman_runtime.machine.as_deref(),
+            Some("${PODMAN_MACHINE_NAME}")
+        );
+        assert_eq!(
+            stratum.depends_on.as_deref(),
+            Some(&["bitcoind".to_string()][..])
+        );
+        assert_eq!(
+            mempool.depends_on.as_deref(),
+            Some(&["bitcoind".to_string(), "podman_runtime".to_string()][..])
+        );
     }
 }

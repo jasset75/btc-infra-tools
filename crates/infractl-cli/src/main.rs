@@ -209,6 +209,14 @@ fn run<C: Clock, E: EnvResolver, D: DotenvLoader, O: Write>(
                     cli.dry_run,
                 ),
             ),
+            ServiceCommand::BringUp { name } => emit(
+                &deps.clock,
+                stdout,
+                cli.json,
+                cli.dry_run,
+                "service.bring-up",
+                &format!("bring-up target={name}"),
+            ),
             ServiceCommand::Logs { name, follow } => emit(
                 &deps.clock,
                 stdout,

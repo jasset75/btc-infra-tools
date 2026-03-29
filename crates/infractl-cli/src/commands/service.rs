@@ -15,6 +15,7 @@ use std::path::PathBuf;
 
 const LAUNCHD_MANAGER: &str = "launchd";
 const PODMAN_COMPOSE_MANAGER: &str = "podman_compose";
+const PODMAN_MACHINE_MANAGER: &str = "podman_machine";
 
 #[derive(Serialize)]
 struct ServiceStatusData {
@@ -32,6 +33,8 @@ struct ServiceStatusData {
     #[serde(skip_serializing_if = "Option::is_none")]
     project: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    machine: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     running_containers: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     query_error: Option<String>,
@@ -48,6 +51,7 @@ impl ServiceStatusData {
             compose_file: None,
             compose_override: None,
             project: None,
+            machine: None,
             running_containers: None,
             query_error,
         }
@@ -71,7 +75,29 @@ impl ServiceStatusData {
             compose_file,
             compose_override,
             project,
+            machine: None,
             running_containers: Some(running_containers),
+            query_error,
+        }
+    }
+
+    fn podman_machine(
+        service: &str,
+        machine: Option<String>,
+        state: &str,
+        query_error: Option<String>,
+    ) -> Self {
+        Self {
+            service: service.to_string(),
+            manager: PODMAN_MACHINE_MANAGER.to_string(),
+            state: state.to_string(),
+            unit: None,
+            pid: None,
+            compose_file: None,
+            compose_override: None,
+            project: None,
+            machine,
+            running_containers: None,
             query_error,
         }
     }
@@ -268,6 +294,50 @@ fn compute_status(ctx: &StatusEmitCtx<'_, impl Write>, service: &infractl_core::
         });
     }
 
+    if service.manager == PODMAN_MACHINE_MANAGER {
+        let service_name = ctx.service_name.to_string();
+        let machine_tmpl = service
+            .machine
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("service `{}` is missing `machine`", ctx.service_name))?;
+        let machine = match expand_placeholders(machine_tmpl, ctx.env_resolver) {
+            Ok(value) => value,
+            Err(err) => {
+                return Ok(unknown_status(
+                    ctx,
+                    ServiceStatusData::podman_machine(
+                        &service_name,
+                        Some(machine_tmpl.to_string()),
+                        "unknown",
+                        Some(err.to_string()),
+                    ),
+                ));
+            }
+        };
+
+        let (state, query_error) =
+            match infractl_adapters::PodmanMachineAdapter.is_running(&machine) {
+                Ok(true) => ("running", None),
+                Ok(false) => ("stopped", None),
+                Err(err) => ("unknown", Some(err.to_string())),
+            };
+
+        let message = format!(
+            "status target={} ui={:?} state={state}",
+            ctx.service_name, ctx.ui_mode
+        );
+        let status_data = ServiceStatusData::podman_machine(
+            ctx.service_name,
+            Some(machine),
+            state,
+            query_error,
+        );
+        return Ok(StatusComputation {
+            message,
+            data: status_data,
+        });
+    }
+
     Ok(StatusComputation {
         message: format!(
             "status target={} ui={:?} manager={} (real status not implemented)",
@@ -282,6 +352,7 @@ fn compute_status(ctx: &StatusEmitCtx<'_, impl Write>, service: &infractl_core::
             compose_file: None,
             compose_override: None,
             project: None,
+            machine: None,
             running_containers: None,
             query_error: None,
         },

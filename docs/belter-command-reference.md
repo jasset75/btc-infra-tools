@@ -103,6 +103,7 @@ belter
     start <name>
     stop <name>
     restart <name>
+    bring-up <name>
     logs <name> [--follow]
   health
     check [--all | --id <ID>] [--ui <auto|cli|tui> | --tui]
@@ -292,6 +293,77 @@ Example:
 
 ```bash
 belter health pool 192.0.2.10
+```
+
+### `service bring-up <name>`
+- Scope: `local-only`
+- Status: planned, not implemented yet.
+- Parameters:
+  - `name` (required)
+- Intent:
+  - Provide a reboot-safe flow to bring a managed service back after host restart or maintenance.
+  - First specialized implementation target is `mempool` on macOS with Podman.
+  - Keep generic `service start|stop|restart` simple and manager-oriented.
+- Behavior:
+  - Dispatches to a service-specific bring-up workflow.
+  - First iteration supports `name = mempool`.
+  - Loads `.env` and resolves the configured `service.mempool` `compose_file`, `compose_override`, and `project`.
+  - For `mempool`, runs preflight checks before any compose lifecycle action:
+    - validate `podman` is installed,
+    - validate the configured compose files exist,
+    - validate `podman compose` is usable on the host,
+    - check Podman runtime availability and start `podman machine` when the VM exists but is stopped,
+    - fail fast with actionable diagnostics if the runtime cannot be reached.
+  - For `mempool`, runs controlled bring-up using the configured compose project:
+    - `podman compose ... up -d`
+  - For `mempool`, runs post-start validation:
+    - `podman compose ... ps`
+    - HTTP probes against:
+      - `/api/v1/backend-info`
+      - `/api/blocks/tip/height`
+      - `/api/mempool`
+  - Returns structured output that differentiates:
+    - preflight failure,
+    - compose bring-up failure,
+    - runtime started but HTTP validation failed,
+    - full success.
+- Retry policy for first iteration:
+  - Retries are reserved for transient readiness only, not for configuration or dependency errors.
+  - Candidate retry points:
+    - waiting for `podman machine` to become reachable after a successful start request,
+    - waiting for `podman compose ... ps` to show running containers after `up -d`,
+    - waiting for `mempool` HTTP endpoints to return healthy responses.
+  - Candidate non-retriable failures:
+    - missing `podman` binary,
+    - missing compose files,
+    - unusable `podman compose` provider,
+    - unresolved environment placeholders,
+    - invalid host port policy or known static config errors,
+    - authentication failures against Bitcoin RPC when clearly reported as such.
+  - Recommended initial backoff:
+    - `attempts = 5`
+    - `initial_delay = 1s`
+    - exponential factor `2`
+    - `max_delay = 8s`
+  - Design guidance:
+    - first implementation may use simple synchronous polling and sleep;
+    - introducing `tokio-retry` is acceptable later if async execution becomes justified by multiple readiness loops or richer orchestration.
+- Non-goals for the first iteration:
+  - no mutation of upstream `mempool` compose files,
+  - no secret creation or rotation,
+  - no automatic patching of invalid host port mappings,
+  - no Bitcoin Core RPC credential provisioning.
+- Operator assumptions:
+  - `service.mempool` points to external compose files, not to a pristine upstream clone,
+  - the compose override already encodes the correct RPC host for Podman on macOS (`host.containers.internal`),
+  - the published web port is non-privileged (recommended: `8080`).
+
+Examples:
+
+```bash
+belter service bring-up mempool
+belter --json service bring-up mempool
+belter --dry-run service bring-up mempool
 ```
 
 ## run

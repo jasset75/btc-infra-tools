@@ -1,10 +1,11 @@
-use crate::{LaunchdAdapter, PodmanComposeAdapter};
+use crate::{LaunchdAdapter, PodmanComposeAdapter, PodmanMachineAdapter};
 use infractl_core::plan::{ExecutionReport, Executor, Operation, Plan};
 use std::io::Write;
 
 pub struct RealExecutor {
     launchd: LaunchdAdapter,
     podman_compose: PodmanComposeAdapter,
+    podman_machine: PodmanMachineAdapter,
 }
 
 impl RealExecutor {
@@ -12,6 +13,7 @@ impl RealExecutor {
         Self {
             launchd: LaunchdAdapter,
             podman_compose: PodmanComposeAdapter,
+            podman_machine: PodmanMachineAdapter,
         }
     }
 }
@@ -63,6 +65,11 @@ impl Executor for RealExecutor {
                     compose_override.as_deref(),
                     project.as_deref(),
                 )?,
+                Operation::StartPodmanMachine { machine } => self.podman_machine.start(machine)?,
+                Operation::StopPodmanMachine { machine } => self.podman_machine.stop(machine)?,
+                Operation::RestartPodmanMachine { machine } => {
+                    self.podman_machine.restart(machine)?
+                }
             }
         }
         Ok(reports)
@@ -149,6 +156,24 @@ impl<W: Write> Executor for DryRunExecutor<W> {
                     compose_file,
                     compose_override
                 )?,
+                Operation::StartPodmanMachine { machine } => writeln!(
+                    self.writer,
+                    "  [DRY-RUN] {}. Would start `podman_machine` `{}`",
+                    i + 1,
+                    machine
+                )?,
+                Operation::StopPodmanMachine { machine } => writeln!(
+                    self.writer,
+                    "  [DRY-RUN] {}. Would stop `podman_machine` `{}`",
+                    i + 1,
+                    machine
+                )?,
+                Operation::RestartPodmanMachine { machine } => writeln!(
+                    self.writer,
+                    "  [DRY-RUN] {}. Would restart `podman_machine` `{}`",
+                    i + 1,
+                    machine
+                )?,
             }
         }
         Ok(Vec::new())
@@ -195,5 +220,23 @@ mod tests {
 
         let rendered = String::from_utf8(output).expect("writer should contain utf8");
         assert!(rendered.contains("Would restart `podman_compose` project Some(\"docker\")"));
+    }
+
+    #[test]
+    fn dry_run_executor_renders_podman_machine_operations() {
+        let mut output = Vec::new();
+        let mut executor = DryRunExecutor::new(&mut output);
+        let plan = Plan {
+            operations: vec![Operation::StartPodmanMachine {
+                machine: "podman-machine-default".to_string(),
+            }],
+        };
+
+        executor
+            .execute(&plan)
+            .expect("dry-run execution should succeed");
+
+        let rendered = String::from_utf8(output).expect("writer should contain utf8");
+        assert!(rendered.contains("Would start `podman_machine` `podman-machine-default`"));
     }
 }

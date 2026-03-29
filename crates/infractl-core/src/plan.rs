@@ -27,6 +27,15 @@ pub enum Operation {
         compose_override: Option<String>,
         project: Option<String>,
     },
+    StartPodmanMachine {
+        machine: String,
+    },
+    StopPodmanMachine {
+        machine: String,
+    },
+    RestartPodmanMachine {
+        machine: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]

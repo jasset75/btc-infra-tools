@@ -23,3 +23,13 @@ fn test_cli_info_pool_parse() {
 
     assert!(output.status.success());
 }
+
+#[test]
+fn test_cli_service_bring_up_parse() {
+    let output = Command::new(belter_bin())
+        .args(["--dry-run", "service", "bring-up", "mempool"])
+        .output()
+        .expect("failed to execute process");
+
+    assert!(output.status.success());
+}

@@ -145,3 +145,61 @@ belter
 ## Open Decisions
 1. Secret handling strategy: environment variables vs secret backend.
 2. Extensibility model: built-in adapters vs external plugin system.
+
+## Planned Dependency Model (Bring-Up v1)
+
+To support `belter service bring-up <name>`, the configuration model is expected to grow from isolated service primitives into a small dependency graph.
+
+Design intent:
+- keep `start|stop|restart` as direct manager primitives,
+- add `bring-up` as an orchestration command that resolves dependencies, starts what is missing, and validates health in order,
+- model local runtime dependencies explicitly instead of hardcoding them inside service-specific logic.
+
+Planned configuration shape:
+
+```toml
+[service.bitcoind]
+manager = "launchd"
+unit = "${BITCOIND_LAUNCHD_UNIT}"
+
+[service.podman_runtime]
+manager = "podman_machine"
+machine = "${PODMAN_MACHINE_NAME}"
+
+[service.stratum]
+manager = "launchd"
+unit = "${STRATUM_LAUNCHD_UNIT}"
+depends_on = ["bitcoind"]
+
+[service.mempool]
+manager = "podman_compose"
+compose_file = "${MEMPOOL_COMPOSE_FILE}"
+compose_override = "${MEMPOOL_COMPOSE_OVERRIDE}"
+project = "${MEMPOOL_PROJECT}"
+depends_on = ["bitcoind", "podman_runtime"]
+```
+
+Planned field meanings:
+- `depends_on`: ordered logical dependencies that must be healthy before a service bring-up can continue.
+- `manager = "podman_machine"`: runtime manager for Podman VM-backed availability on macOS.
+- `machine`: Podman machine logical name, for example `podman-machine-default`.
+
+Planned v1 behavior:
+- `service bring-up stratum`
+  - validate `bitcoind`,
+  - start `bitcoind` if needed,
+  - validate `bitcoind`,
+  - start `stratum`.
+- `service bring-up mempool`
+  - validate `bitcoind`,
+  - validate `podman_runtime`,
+  - start missing dependencies in dependency order,
+  - validate dependencies,
+  - start `mempool`,
+  - run post-start HTTP checks.
+
+Scope guardrails for this model:
+- dependency resolution remains local and acyclic,
+- only explicitly declared dependencies are traversed,
+- no scheduler, reconciliation loop, or background controller is introduced,
+- dependency health must remain explicit and actionable per manager.
