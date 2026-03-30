@@ -905,6 +905,16 @@ pub(crate) fn emit_plan<W: Write>(
                 writeln!(stdout, "{}", serde_json::to_string_pretty(&out)?)?;
             } else {
                 writeln!(stdout, "[{}] {}: {}", out.ts, out.command, out.message)?;
+                for event in &out.events {
+                    let level = match event.level {
+                        SeverityLevel::Debug => "debug",
+                        SeverityLevel::Info => "info",
+                        SeverityLevel::Warning => "warning",
+                        SeverityLevel::Error => "error",
+                        SeverityLevel::Fatal => "fatal",
+                    };
+                    writeln!(stdout, "  [{level}] {}: {}", event.code, event.message)?;
+                }
                 if dry_run {
                     emit_dry_run_report(stdout, &out)?;
                 }
