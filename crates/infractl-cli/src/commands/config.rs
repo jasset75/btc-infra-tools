@@ -235,6 +235,7 @@ mod tests {
     use infractl_core::env::FixedEnvResolver;
     use std::collections::HashMap;
     use std::fs;
+    use std::io::ErrorKind;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -250,7 +251,7 @@ mod tests {
         assert!(content.contains("[service.stratum]"));
         assert!(content.contains("unit = \"${STRATUM_LAUNCHD_UNIT}\""));
 
-        fs::remove_dir_all(&dir).expect("fixture dir should be removed");
+        remove_fixture_dir(&dir);
     }
 
     #[test]
@@ -303,7 +304,7 @@ env_file = "${MEMPOOL_ENV_FILE}"
         let message = validate_config_file(&env, &path, false).expect("config should validate");
         assert!(message.contains("configuration is valid"));
 
-        fs::remove_dir_all(&dir).expect("fixture dir should be removed");
+        remove_fixture_dir(&dir);
     }
 
     #[test]
@@ -330,7 +331,7 @@ compose_file = "/tmp/mempool.yml"
             validate_config_file(&env, &path, false).expect_err("config should fail validation");
         assert!(err.to_string().contains("missing required service `stratum`"));
 
-        fs::remove_dir_all(&dir).expect("fixture dir should be removed");
+        remove_fixture_dir(&dir);
     }
 
     #[test]
@@ -366,7 +367,7 @@ compose_file = "/tmp/mempool.yml"
         assert!(rendered.contains("requires missing env var"));
         assert!(rendered.contains("example: `export"));
 
-        fs::remove_dir_all(&dir).expect("fixture dir should be removed");
+        remove_fixture_dir(&dir);
     }
 
     #[test]
@@ -412,7 +413,7 @@ unit = "${BITCOIND_LAUNCHD_UNIT}"
         assert!(written.contains("[service.stratum]"));
         assert!(written.contains("[service.mempool]"));
 
-        fs::remove_dir_all(&dir).expect("fixture dir should be removed");
+        remove_fixture_dir(&dir);
     }
 
     fn unique_fixture_dir() -> PathBuf {
@@ -421,5 +422,13 @@ unit = "${BITCOIND_LAUNCHD_UNIT}"
             .expect("time should be monotonic")
             .as_nanos();
         std::env::temp_dir().join(format!("belter-config-test-{ts}"))
+    }
+
+    fn remove_fixture_dir(dir: &PathBuf) {
+        match fs::remove_dir_all(dir) {
+            Ok(()) => {}
+            Err(err) if err.kind() == ErrorKind::NotFound => {}
+            Err(err) => panic!("fixture dir should be removed: {err}"),
+        }
     }
 }
