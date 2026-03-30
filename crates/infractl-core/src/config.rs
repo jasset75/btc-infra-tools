@@ -28,6 +28,7 @@ manager = "podman_compose"
 compose_file = "${MEMPOOL_COMPOSE_FILE}"
 compose_override = "${MEMPOOL_COMPOSE_OVERRIDE}"
 project = "${MEMPOOL_PROJECT}"
+env_file = "${MEMPOOL_ENV_FILE}"
 depends_on = ["bitcoind", "podman_runtime"]
 tags = ["explorer"]
 
@@ -61,6 +62,7 @@ pub struct ServiceConfig {
     pub compose_file: Option<String>,
     pub compose_override: Option<String>,
     pub project: Option<String>,
+    pub env_file: Option<String>,
     pub machine: Option<String>,
     pub depends_on: Option<Vec<String>>,
 }

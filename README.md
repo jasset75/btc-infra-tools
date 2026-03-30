@@ -126,6 +126,7 @@ MEMPOOL_PORT=8080
 MEMPOOL_COMPOSE_FILE=$HOME/mempool-local/ops/mempool/config/docker-compose.base.yml
 MEMPOOL_COMPOSE_OVERRIDE=$HOME/mempool-local/ops/mempool/config/docker-compose.override.yml
 MEMPOOL_PROJECT=docker
+MEMPOOL_ENV_FILE=$HOME/mempool-local/ops/env/mempool.env
 BITCOIND_LAUNCHD_UNIT=system/com.bitcoind.node
 STRATUM_LAUNCHD_UNIT=gui/501/io.btc.public-pool
 ```
@@ -137,6 +138,7 @@ Placeholder notes for `.env.example`:
 - `<path_to_mempool_compose_file>`: absolute path to the base compose file copied from upstream.
 - `<path_to_mempool_compose_override_file>`: absolute path to the local override compose file.
 - `<podman_compose_project_name>`: compose project name passed as `podman compose -p ...`; current recommended value is `docker`.
+- `<path_to_mempool_runtime_env_file>`: absolute path to the runtime env file used by the `mempool` compose stack, usually `$HOME/mempool-local/ops/env/mempool.env`.
 - `<path_to_bitcoind_workdir>`: host working directory for the managed Bitcoin Core service, if used.
 - `<path_to_bitcoind_datadir>`: host datadir passed to `bitcoin-cli`, if used.
 - `<launchd_unit_for_bitcoind>`: full launchd target, for example `system/com.bitcoind.node`.

@@ -6,6 +6,7 @@ use std::path::PathBuf;
 
 const LAUNCHD_MANAGER: &str = "launchd";
 const PODMAN_COMPOSE_MANAGER: &str = "podman_compose";
+const PODMAN_MACHINE_MANAGER: &str = "podman_machine";
 const REQUIRED_SERVICES: [&str; 3] = ["bitcoind", "stratum", "mempool"];
 
 pub(crate) fn init_config_file(path: &PathBuf, force: bool) -> Result<()> {
@@ -104,6 +105,19 @@ pub(crate) fn validate_config_file(
                 if let Some(value) = service.project.as_deref() {
                     resolve_placeholder_for_field(env_resolver, name, "project", value)?;
                 }
+
+                if let Some(value) = service.env_file.as_deref() {
+                    resolve_placeholder_for_field(env_resolver, name, "env_file", value)?;
+                }
+            }
+            PODMAN_MACHINE_MANAGER => {
+                let machine_tmpl = service.machine.as_deref().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "service `{name}` is missing `machine`.\n\nExample:\n{}",
+                        example_service_block(name)
+                    )
+                })?;
+                resolve_placeholder_for_field(env_resolver, name, "machine", machine_tmpl)?;
             }
             other => bail!("service `{name}` has unsupported manager `{other}`"),
         }
@@ -199,7 +213,13 @@ unit = "${STRATUM_LAUNCHD_UNIT}""#
 manager = "podman_compose"
 compose_file = "${MEMPOOL_COMPOSE_FILE}"
 compose_override = "${MEMPOOL_COMPOSE_OVERRIDE}"
-project = "${MEMPOOL_PROJECT}""#
+project = "${MEMPOOL_PROJECT}"
+env_file = "${MEMPOOL_ENV_FILE}""#
+        }
+        "podman_runtime" => {
+            r#"[service.podman_runtime]
+manager = "podman_machine"
+machine = "${PODMAN_MACHINE_NAME}""#
         }
         _ => {
             r#"[service.<name>]
@@ -254,6 +274,7 @@ manager = "podman_compose"
 compose_file = "${MEMPOOL_COMPOSE_FILE}"
 compose_override = "${MEMPOOL_COMPOSE_OVERRIDE}"
 project = "${MEMPOOL_PROJECT}"
+env_file = "${MEMPOOL_ENV_FILE}"
 "#,
         )
         .expect("config should be written");
@@ -276,6 +297,7 @@ project = "${MEMPOOL_PROJECT}"
                 "/tmp/mempool.override.yml".to_string(),
             ),
             ("MEMPOOL_PROJECT".to_string(), "mempool".to_string()),
+            ("MEMPOOL_ENV_FILE".to_string(), "/tmp/mempool.env".to_string()),
         ]));
 
         let message = validate_config_file(&env, &path, false).expect("config should validate");
@@ -380,6 +402,7 @@ unit = "${BITCOIND_LAUNCHD_UNIT}"
                 "/tmp/mempool.override.yml".to_string(),
             ),
             ("MEMPOOL_PROJECT".to_string(), "mempool".to_string()),
+            ("MEMPOOL_ENV_FILE".to_string(), "/tmp/mempool.env".to_string()),
         ]));
 
         let message = validate_config_file(&env, &path, true).expect("config should validate");

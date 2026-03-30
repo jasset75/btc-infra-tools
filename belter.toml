@@ -11,6 +11,7 @@ manager = "podman_compose"
 compose_file = "${MEMPOOL_COMPOSE_FILE}"
 compose_override = "${MEMPOOL_COMPOSE_OVERRIDE}"
 project = "${MEMPOOL_PROJECT}"
+env_file = "${MEMPOOL_ENV_FILE}"
 tags = ["explorer"]
 depends_on = ["bitcoind", "podman_runtime"]
 

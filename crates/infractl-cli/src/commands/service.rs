@@ -11,6 +11,8 @@ use serde::Serialize;
 use serde_json::json;
 use std::fs;
 use std::io::Write;
+use std::io::{Read};
+use std::net::TcpStream;
 use std::path::PathBuf;
 
 const LAUNCHD_MANAGER: &str = "launchd";
@@ -35,6 +37,8 @@ struct ServiceStatusData {
     #[serde(skip_serializing_if = "Option::is_none")]
     machine: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    health_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     running_containers: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     query_error: Option<String>,
@@ -52,6 +56,7 @@ impl ServiceStatusData {
             compose_override: None,
             project: None,
             machine: None,
+            health_url: None,
             running_containers: None,
             query_error,
         }
@@ -76,6 +81,7 @@ impl ServiceStatusData {
             compose_override,
             project,
             machine: None,
+            health_url: None,
             running_containers: Some(running_containers),
             query_error,
         }
@@ -97,9 +103,16 @@ impl ServiceStatusData {
             compose_override: None,
             project: None,
             machine,
+            health_url: None,
             running_containers: None,
             query_error,
         }
+    }
+
+    fn with_health(mut self, health_url: Option<String>, query_error: Option<String>) -> Self {
+        self.health_url = health_url;
+        self.query_error = query_error;
+        self
     }
 }
 
@@ -262,32 +275,54 @@ fn compute_status(ctx: &StatusEmitCtx<'_, impl Write>, service: &infractl_core::
             }
         };
 
-        let (state, running_containers, query_error) =
+        let (state, running_containers, query_error, health_url) =
             match infractl_adapters::PodmanComposeAdapter.running_container_ids(
                 &compose_file,
                 compose_override.as_deref(),
                 project.as_deref(),
             ) {
                 Ok(ids) => {
-                    let state = if ids.is_empty() { "stopped" } else { "running" };
-                    (state, ids, None)
+                    if ids.is_empty() {
+                        ("stopped", ids, None, None)
+                    } else if ctx.service_name == "mempool" {
+                        let url = mempool_health_url(ctx.env_resolver);
+                        match probe_http_200(&url) {
+                            Ok(()) => ("running", ids, None, Some(url)),
+                            Err(err) => ("degraded", ids, Some(err.to_string()), Some(url)),
+                        }
+                    } else {
+                        ("running", ids, None, None)
+                    }
                 }
-                Err(err) => ("unknown", Vec::new(), Some(err.to_string())),
+                Err(err) => ("unknown", Vec::new(), Some(err.to_string()), None),
             };
 
         let message = format!(
             "status target={} ui={:?} state={state}",
             ctx.service_name, ctx.ui_mode
         );
-        let status_data = ServiceStatusData::podman(
-            ctx.service_name,
-            Some(compose_file),
-            compose_override,
-            project,
-            state,
-            running_containers,
-            query_error,
-        );
+        let status_data = if ctx.service_name == "mempool" {
+            ServiceStatusData::podman(
+                ctx.service_name,
+                Some(compose_file),
+                compose_override,
+                project,
+                state,
+                running_containers,
+                None,
+            )
+            .with_health(health_url, query_error)
+        } else {
+            ServiceStatusData::podman(
+                ctx.service_name,
+                Some(compose_file),
+                compose_override,
+                project,
+                state,
+                running_containers,
+                query_error,
+            )
+        };
         return Ok(StatusComputation {
             message,
             data: status_data,
@@ -353,10 +388,87 @@ fn compute_status(ctx: &StatusEmitCtx<'_, impl Write>, service: &infractl_core::
             compose_override: None,
             project: None,
             machine: None,
+            health_url: None,
             running_containers: None,
             query_error: None,
         },
     })
+}
+
+fn mempool_health_url(env_resolver: &dyn EnvResolver) -> String {
+    let host = env_resolver
+        .resolve("MEMPOOL_HOST")
+        .unwrap_or_else(|| "127.0.0.1".to_string());
+    let port = env_resolver
+        .resolve("MEMPOOL_PORT")
+        .unwrap_or_else(|| "8080".to_string());
+    format!("http://{host}:{port}/api/v1/backend-info")
+}
+
+fn probe_http_200(url: &str) -> Result<()> {
+    let endpoint = parse_http_url(url)?;
+    let mut stream = TcpStream::connect((&endpoint.host[..], endpoint.port))
+        .with_context(|| format!("failed to connect to {}", endpoint.authority()))?;
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+        .context("failed to set read timeout")?;
+    stream
+        .set_write_timeout(Some(std::time::Duration::from_secs(2)))
+        .context("failed to set write timeout")?;
+
+    let request = format!(
+        "GET {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\nAccept: application/json\r\n\r\n",
+        endpoint.path,
+        endpoint.authority()
+    );
+    stream
+        .write_all(request.as_bytes())
+        .context("failed to write HTTP request")?;
+
+    let mut response = String::new();
+    stream
+        .read_to_string(&mut response)
+        .context("failed to read HTTP response")?;
+
+    let status_line = response.lines().next().unwrap_or_default();
+    if status_line.contains(" 200 ") {
+        return Ok(());
+    }
+
+    bail!("unexpected HTTP status from {}: {}", endpoint.authority(), status_line)
+}
+
+struct HttpEndpoint {
+    host: String,
+    port: u16,
+    path: String,
+}
+
+impl HttpEndpoint {
+    fn authority(&self) -> String {
+        format!("{}:{}", self.host, self.port)
+    }
+}
+
+fn parse_http_url(url: &str) -> Result<HttpEndpoint> {
+    let without_scheme = url
+        .strip_prefix("http://")
+        .ok_or_else(|| anyhow::anyhow!("unsupported URL scheme for `{url}`"))?;
+    let (authority, path) = match without_scheme.split_once('/') {
+        Some((authority, rest)) => (authority, format!("/{}", rest)),
+        None => (without_scheme, "/".to_string()),
+    };
+
+    let (host, port) = match authority.split_once(':') {
+        Some((host, port)) => (
+            host.to_string(),
+            port.parse::<u16>()
+                .with_context(|| format!("invalid port in `{url}`"))?,
+        ),
+        None => (authority.to_string(), 80),
+    };
+
+    Ok(HttpEndpoint { host, port, path })
 }
 
 fn unknown_status(ctx: &StatusEmitCtx<'_, impl Write>, data: ServiceStatusData) -> StatusComputation {
@@ -406,6 +518,8 @@ pub(crate) fn execute_service_command_from_config(
     let config: BelterConfig = toml::from_str(&raw)
         .with_context(|| format!("failed to parse TOML from {}", config_path.display()))?;
 
+    maybe_load_service_env_file(env_resolver, &config, service_name)?;
+
     let req = ServiceCommandRequest {
         config: &config,
         service_name,
@@ -435,6 +549,29 @@ pub(crate) fn execute_service_command_from_config(
             events: Vec::new(),
         })
     }
+}
+
+fn maybe_load_service_env_file(
+    env_resolver: &dyn EnvResolver,
+    config: &BelterConfig,
+    service_name: &str,
+) -> Result<()> {
+    let Some(service) = config.service_by_name(service_name) else {
+        return Ok(());
+    };
+
+    if service.manager != PODMAN_COMPOSE_MANAGER {
+        return Ok(());
+    }
+
+    let Some(env_file_tmpl) = service.env_file.as_deref() else {
+        return Ok(());
+    };
+
+    let env_file = expand_placeholders(env_file_tmpl, env_resolver)?;
+    dotenvy::from_filename_override(&env_file)
+        .with_context(|| format!("failed to load service env file {env_file}"))?;
+    Ok(())
 }
 
 pub(crate) struct PlanExecutionResult {

@@ -139,12 +139,14 @@ impl PodmanComposeAdapter {
             "status",
         )?;
 
-        Ok(output
-            .lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty())
-            .map(ToOwned::to_owned)
-            .collect())
+        let mut running = Vec::new();
+        for id in output.lines().map(str::trim).filter(|line| !line.is_empty()) {
+            if self.container_is_running(id)? {
+                running.push(id.to_owned());
+            }
+        }
+
+        Ok(running)
     }
 
     fn run_compose(
@@ -207,6 +209,31 @@ impl PodmanComposeAdapter {
         bail!(
             "podman compose {action} failed (compose_file={compose_file}, override={compose_override:?}, project={project:?}, status={code:?}, stdout={stdout}, stderr={stderr})"
         )
+    }
+
+    fn container_is_running(&self, container_id: &str) -> Result<bool> {
+        let output = Command::new("podman")
+            .args(["inspect", container_id])
+            .output()?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            let code = output.status.code();
+            bail!(
+                "podman inspect failed (container_id={container_id}, status={code:?}, stdout={stdout}, stderr={stderr})"
+            );
+        }
+
+        let parsed: Value = serde_json::from_slice(&output.stdout)?;
+        let running = parsed
+            .as_array()
+            .and_then(|items| items.first())
+            .and_then(|item| item.get("State"))
+            .and_then(|state| state.get("Running"))
+            .and_then(Value::as_bool)
+            .ok_or_else(|| anyhow::anyhow!("podman inspect output missing `State.Running` field"))?;
+
+        Ok(running)
     }
 }
 
