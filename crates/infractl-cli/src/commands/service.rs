@@ -570,7 +570,7 @@ pub(crate) fn execute_service_bring_up_from_config(
         maybe_load_service_env_file(env_resolver, &config, name)?;
     }
 
-    let plan = build_bring_up_plan(&config, env_resolver, &ordered_services)?;
+    let plan = build_bring_up_plan(&config, env_resolver, &ordered_services, dry_run)?;
 
     use infractl_core::plan::Executor;
 
@@ -669,16 +669,12 @@ fn build_bring_up_plan(
     config: &BelterConfig,
     env_resolver: &dyn EnvResolver,
     ordered_services: &[String],
+    dry_run: bool,
 ) -> Result<Plan> {
     let mut operations = Vec::new();
 
     for service_name in ordered_services {
-        let service = config
-            .service_by_name(service_name)
-            .ok_or_else(|| anyhow::anyhow!("service `{service_name}` not found in config"))?;
-        let state = compute_runtime_state(service_name, service, env_resolver)?;
-
-        if should_start_for_bring_up(service_name, state) {
+        if dry_run {
             let req = ServiceCommandRequest {
                 config,
                 service_name,
@@ -686,6 +682,21 @@ fn build_bring_up_plan(
             };
             let mut plan = req.plan(env_resolver)?;
             operations.append(&mut plan.operations);
+        } else {
+            let service = config
+                .service_by_name(service_name)
+                .ok_or_else(|| anyhow::anyhow!("service `{service_name}` not found in config"))?;
+            let state = compute_runtime_state(service_name, service, env_resolver)?;
+
+            if should_start_for_bring_up(service_name, state) {
+                let req = ServiceCommandRequest {
+                    config,
+                    service_name,
+                    action: ServiceAction::Start,
+                };
+                let mut plan = req.plan(env_resolver)?;
+                operations.append(&mut plan.operations);
+            }
         }
     }
 
