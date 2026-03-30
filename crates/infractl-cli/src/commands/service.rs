@@ -3,9 +3,9 @@ use crate::output::{emit_dry_run_report, output_envelope};
 use anyhow::{Context, Result, bail};
 use infractl_core::config::BelterConfig;
 use infractl_core::env::{EnvResolver, expand_placeholders};
-use infractl_core::output::OutputEvent;
+use infractl_core::output::{OutputEvent, SeverityLevel};
 use infractl_core::plan::{ExecutionDetails, ExecutionReport, Plan};
-use infractl_core::time::Clock;
+use infractl_core::time::{Clock, SystemClock};
 use infractl_core::usecase::{ServiceAction, ServiceCommandRequest};
 use serde::Serialize;
 use serde_json::json;
@@ -570,39 +570,52 @@ pub(crate) fn execute_service_bring_up_from_config(
         maybe_load_service_env_file(env_resolver, &config, name)?;
     }
 
-    let plan = build_bring_up_plan(&config, env_resolver, &ordered_services, dry_run)?;
+    let bring_up = build_bring_up_plan(&config, env_resolver, &ordered_services, dry_run)?;
 
     use infractl_core::plan::Executor;
 
     if dry_run {
         let mut executor = infractl_adapters::executor::DryRunExecutor::sink();
-        executor.execute(&plan)?;
+        executor.execute(&bring_up.plan)?;
         return Ok(PlanExecutionResult {
-            plan,
+            plan: bring_up.plan,
             message: format!(
                 "would bring up service `{service_name}` (dependencies: {})",
                 ordered_services.join(", ")
             ),
             execution_report: Vec::new(),
-            events: Vec::new(),
+            events: bring_up.events,
         });
     }
 
     let mut executor = infractl_adapters::executor::RealExecutor::new();
-    let execution_report = executor.execute(&plan)?;
+    let execution_report = executor.execute(&bring_up.plan)?;
+    let mut events = bring_up.events;
 
     if service_name == "mempool" {
+        events.push(output_event(
+            SeverityLevel::Info,
+            "bring_up.waiting_readiness",
+            "waiting for mempool HTTP readiness",
+            json!({ "health_url": mempool_health_url(env_resolver) }),
+        ));
         wait_for_mempool_readiness(env_resolver)?;
+        events.push(output_event(
+            SeverityLevel::Info,
+            "bring_up.ready",
+            "mempool backend responded with HTTP 200",
+            json!({ "health_url": mempool_health_url(env_resolver) }),
+        ));
     }
 
     Ok(PlanExecutionResult {
-        plan,
+        plan: bring_up.plan,
         message: format!(
             "bring-up completed for service `{service_name}` (dependencies: {})",
             ordered_services.join(", ")
         ),
         execution_report,
-        events: Vec::new(),
+        events,
     })
 }
 
@@ -670,11 +683,18 @@ fn build_bring_up_plan(
     env_resolver: &dyn EnvResolver,
     ordered_services: &[String],
     dry_run: bool,
-) -> Result<Plan> {
+) -> Result<BringUpPlan> {
     let mut operations = Vec::new();
+    let mut events = Vec::new();
 
     for service_name in ordered_services {
         if dry_run {
+            events.push(output_event(
+                SeverityLevel::Info,
+                "bring_up.plan_start",
+                &format!("would start `{service_name}`"),
+                json!({ "service": service_name }),
+            ));
             let req = ServiceCommandRequest {
                 config,
                 service_name,
@@ -689,6 +709,12 @@ fn build_bring_up_plan(
             let state = compute_runtime_state(service_name, service, env_resolver)?;
 
             if should_start_for_bring_up(service_name, state) {
+                events.push(output_event(
+                    SeverityLevel::Info,
+                    "bring_up.starting",
+                    &format!("starting `{service_name}`"),
+                    json!({ "service": service_name, "state": runtime_state_label(state) }),
+                ));
                 let req = ServiceCommandRequest {
                     config,
                     service_name,
@@ -696,11 +722,26 @@ fn build_bring_up_plan(
                 };
                 let mut plan = req.plan(env_resolver)?;
                 operations.append(&mut plan.operations);
+            } else {
+                events.push(output_event(
+                    SeverityLevel::Info,
+                    "bring_up.skipped",
+                    &format!("`{service_name}` already healthy; skipping"),
+                    json!({ "service": service_name, "state": runtime_state_label(state) }),
+                ));
             }
         }
     }
 
-    Ok(Plan { operations })
+    Ok(BringUpPlan {
+        plan: Plan { operations },
+        events,
+    })
+}
+
+struct BringUpPlan {
+    plan: Plan,
+    events: Vec<OutputEvent>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -786,6 +827,15 @@ fn should_start_for_bring_up(service_name: &str, state: RuntimeState) -> bool {
     }
 }
 
+fn runtime_state_label(state: RuntimeState) -> &'static str {
+    match state {
+        RuntimeState::Running => "running",
+        RuntimeState::Stopped => "stopped",
+        RuntimeState::Degraded => "degraded",
+        RuntimeState::Unknown => "unknown",
+    }
+}
+
 fn wait_for_mempool_readiness(env_resolver: &dyn EnvResolver) -> Result<()> {
     let url = mempool_health_url(env_resolver);
     let mut delay = Duration::from_secs(1);
@@ -804,6 +854,22 @@ fn wait_for_mempool_readiness(env_resolver: &dyn EnvResolver) -> Result<()> {
     }
 
     bail!("mempool did not become ready at {url}")
+}
+
+fn output_event(
+    level: SeverityLevel,
+    code: &str,
+    message: &str,
+    details: serde_json::Value,
+) -> OutputEvent {
+    let clock = SystemClock;
+    OutputEvent {
+        ts: clock.now_utc_rfc3339(),
+        level,
+        code: code.to_string(),
+        message: message.to_string(),
+        details,
+    }
 }
 
 pub(crate) struct PlanExecutionResult {

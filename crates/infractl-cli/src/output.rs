@@ -1,5 +1,5 @@
 use anyhow::Result;
-use infractl_core::output::{OutputEnvelope, OutputEvent};
+use infractl_core::output::{OutputEnvelope, OutputEvent, SeverityLevel};
 use infractl_core::time::Clock;
 use serde::Serialize;
 use serde_json::Value;
@@ -12,6 +12,7 @@ struct DryRunTextReport<'a> {
     message: &'a str,
     dry_run: bool,
     data: &'a Value,
+    events: &'a [OutputEvent],
 }
 
 fn dry_run_text_report(out: &OutputEnvelope) -> DryRunTextReport<'_> {
@@ -21,6 +22,7 @@ fn dry_run_text_report(out: &OutputEnvelope) -> DryRunTextReport<'_> {
         message: &out.message,
         dry_run: out.dry_run,
         data: &out.data,
+        events: &out.events,
     }
 }
 
@@ -38,6 +40,7 @@ pub(crate) fn emit<W: Write>(
         writeln!(stdout, "{}", serde_json::to_string_pretty(&out)?)?;
     } else {
         writeln!(stdout, "[{}] {}: {}", out.ts, out.command, out.message)?;
+        emit_events_text(stdout, &out)?;
     }
     Ok(())
 }
@@ -49,6 +52,21 @@ pub(crate) fn emit_dry_run_report<W: Write>(stdout: &mut W, out: &OutputEnvelope
         "{}",
         serde_json::to_string_pretty(&dry_run_text_report(out))?
     )?;
+    emit_events_text(stdout, out)?;
+    Ok(())
+}
+
+fn emit_events_text<W: Write>(stdout: &mut W, out: &OutputEnvelope) -> Result<()> {
+    for event in &out.events {
+        let level = match event.level {
+            SeverityLevel::Debug => "debug",
+            SeverityLevel::Info => "info",
+            SeverityLevel::Warning => "warning",
+            SeverityLevel::Error => "error",
+            SeverityLevel::Fatal => "fatal",
+        };
+        writeln!(stdout, "  [{level}] {}: {}", event.code, event.message)?;
+    }
     Ok(())
 }
 
