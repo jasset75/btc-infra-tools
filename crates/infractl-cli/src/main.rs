@@ -20,7 +20,8 @@ use crate::cli::{
 use crate::commands::config::{init_config_file, validate_config_file};
 use crate::commands::health::{PoolHealthRequest, emit_pool_health};
 use crate::commands::service::{
-    StatusEmitCtx, emit_plan, emit_status, execute_service_command_from_config,
+    StatusEmitCtx, emit_plan, emit_status, execute_service_bring_up_from_config,
+    execute_service_command_from_config,
 };
 use crate::output::{emit, error_envelope};
 #[cfg(test)]
@@ -209,13 +210,18 @@ fn run<C: Clock, E: EnvResolver, D: DotenvLoader, O: Write>(
                     cli.dry_run,
                 ),
             ),
-            ServiceCommand::BringUp { name } => emit(
+            ServiceCommand::BringUp { name } => emit_plan(
                 &deps.clock,
                 stdout,
                 cli.json,
                 cli.dry_run,
                 "service.bring-up",
-                &format!("bring-up target={name}"),
+                execute_service_bring_up_from_config(
+                    &deps.env_resolver,
+                    &cli.config,
+                    name,
+                    cli.dry_run,
+                ),
             ),
             ServiceCommand::Logs { name, follow } => emit(
                 &deps.clock,

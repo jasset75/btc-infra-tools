@@ -9,11 +9,14 @@ use infractl_core::time::Clock;
 use infractl_core::usecase::{ServiceAction, ServiceCommandRequest};
 use serde::Serialize;
 use serde_json::json;
+use std::collections::HashSet;
 use std::fs;
 use std::io::Write;
 use std::io::{Read};
 use std::net::TcpStream;
 use std::path::PathBuf;
+use std::thread;
+use std::time::Duration;
 
 const LAUNCHD_MANAGER: &str = "launchd";
 const PODMAN_COMPOSE_MANAGER: &str = "podman_compose";
@@ -551,6 +554,58 @@ pub(crate) fn execute_service_command_from_config(
     }
 }
 
+pub(crate) fn execute_service_bring_up_from_config(
+    env_resolver: &dyn EnvResolver,
+    config_path: &PathBuf,
+    service_name: &str,
+    dry_run: bool,
+) -> Result<PlanExecutionResult> {
+    let raw = fs::read_to_string(config_path)
+        .with_context(|| format!("failed to read config file {}", config_path.display()))?;
+    let config: BelterConfig = toml::from_str(&raw)
+        .with_context(|| format!("failed to parse TOML from {}", config_path.display()))?;
+
+    let ordered_services = resolve_bring_up_order(&config, service_name)?;
+    for name in &ordered_services {
+        maybe_load_service_env_file(env_resolver, &config, name)?;
+    }
+
+    let plan = build_bring_up_plan(&config, env_resolver, &ordered_services)?;
+
+    use infractl_core::plan::Executor;
+
+    if dry_run {
+        let mut executor = infractl_adapters::executor::DryRunExecutor::sink();
+        executor.execute(&plan)?;
+        return Ok(PlanExecutionResult {
+            plan,
+            message: format!(
+                "would bring up service `{service_name}` (dependencies: {})",
+                ordered_services.join(", ")
+            ),
+            execution_report: Vec::new(),
+            events: Vec::new(),
+        });
+    }
+
+    let mut executor = infractl_adapters::executor::RealExecutor::new();
+    let execution_report = executor.execute(&plan)?;
+
+    if service_name == "mempool" {
+        wait_for_mempool_readiness(env_resolver)?;
+    }
+
+    Ok(PlanExecutionResult {
+        plan,
+        message: format!(
+            "bring-up completed for service `{service_name}` (dependencies: {})",
+            ordered_services.join(", ")
+        ),
+        execution_report,
+        events: Vec::new(),
+    })
+}
+
 fn maybe_load_service_env_file(
     env_resolver: &dyn EnvResolver,
     config: &BelterConfig,
@@ -572,6 +627,172 @@ fn maybe_load_service_env_file(
     dotenvy::from_filename_override(&env_file)
         .with_context(|| format!("failed to load service env file {env_file}"))?;
     Ok(())
+}
+
+fn resolve_bring_up_order(config: &BelterConfig, service_name: &str) -> Result<Vec<String>> {
+    let mut visited = HashSet::new();
+    let mut stack = HashSet::new();
+    let mut ordered = Vec::new();
+    visit_dependency(config, service_name, &mut visited, &mut stack, &mut ordered)?;
+    Ok(ordered)
+}
+
+fn visit_dependency(
+    config: &BelterConfig,
+    service_name: &str,
+    visited: &mut HashSet<String>,
+    stack: &mut HashSet<String>,
+    ordered: &mut Vec<String>,
+) -> Result<()> {
+    if visited.contains(service_name) {
+        return Ok(());
+    }
+    if !stack.insert(service_name.to_string()) {
+        bail!("cyclic service dependency detected at `{service_name}`");
+    }
+
+    let service = config
+        .service_by_name(service_name)
+        .ok_or_else(|| anyhow::anyhow!("service `{service_name}` not found in config"))?;
+
+    for dependency in service.depends_on.as_deref().unwrap_or(&[]) {
+        visit_dependency(config, dependency, visited, stack, ordered)?;
+    }
+
+    stack.remove(service_name);
+    visited.insert(service_name.to_string());
+    ordered.push(service_name.to_string());
+    Ok(())
+}
+
+fn build_bring_up_plan(
+    config: &BelterConfig,
+    env_resolver: &dyn EnvResolver,
+    ordered_services: &[String],
+) -> Result<Plan> {
+    let mut operations = Vec::new();
+
+    for service_name in ordered_services {
+        let service = config
+            .service_by_name(service_name)
+            .ok_or_else(|| anyhow::anyhow!("service `{service_name}` not found in config"))?;
+        let state = compute_runtime_state(service_name, service, env_resolver)?;
+
+        if should_start_for_bring_up(service_name, state) {
+            let req = ServiceCommandRequest {
+                config,
+                service_name,
+                action: ServiceAction::Start,
+            };
+            let mut plan = req.plan(env_resolver)?;
+            operations.append(&mut plan.operations);
+        }
+    }
+
+    Ok(Plan { operations })
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RuntimeState {
+    Running,
+    Stopped,
+    Degraded,
+    Unknown,
+}
+
+fn compute_runtime_state(
+    service_name: &str,
+    service: &infractl_core::config::ServiceConfig,
+    env_resolver: &dyn EnvResolver,
+) -> Result<RuntimeState> {
+    match service.manager.as_str() {
+        LAUNCHD_MANAGER => {
+            let unit_tmpl = service
+                .unit
+                .as_deref()
+                .ok_or_else(|| anyhow::anyhow!("service `{service_name}` is missing `unit`"))?;
+            let unit = expand_placeholders(unit_tmpl, env_resolver)?;
+            match infractl_adapters::LaunchdAdapter.unit_pid_for_status(&unit) {
+                Ok(Some(_)) => Ok(RuntimeState::Running),
+                Ok(None) => Ok(RuntimeState::Stopped),
+                Err(_) => Ok(RuntimeState::Unknown),
+            }
+        }
+        PODMAN_MACHINE_MANAGER => {
+            let machine_tmpl = service
+                .machine
+                .as_deref()
+                .ok_or_else(|| anyhow::anyhow!("service `{service_name}` is missing `machine`"))?;
+            let machine = expand_placeholders(machine_tmpl, env_resolver)?;
+            match infractl_adapters::PodmanMachineAdapter.is_running(&machine) {
+                Ok(true) => Ok(RuntimeState::Running),
+                Ok(false) => Ok(RuntimeState::Stopped),
+                Err(_) => Ok(RuntimeState::Unknown),
+            }
+        }
+        PODMAN_COMPOSE_MANAGER => {
+            let compose_file_tmpl = service.compose_file.as_deref().ok_or_else(|| {
+                anyhow::anyhow!("service `{service_name}` is missing `compose_file`")
+            })?;
+            let compose_file = expand_placeholders(compose_file_tmpl, env_resolver)?;
+            let compose_override = service
+                .compose_override
+                .as_deref()
+                .map(|value| expand_placeholders(value, env_resolver))
+                .transpose()?;
+            let project = service
+                .project
+                .as_deref()
+                .map(|value| expand_placeholders(value, env_resolver))
+                .transpose()?;
+
+            match infractl_adapters::PodmanComposeAdapter.running_container_ids(
+                &compose_file,
+                compose_override.as_deref(),
+                project.as_deref(),
+            ) {
+                Ok(ids) if ids.is_empty() => Ok(RuntimeState::Stopped),
+                Ok(_) if service_name == "mempool" => {
+                    let url = mempool_health_url(env_resolver);
+                    match probe_http_200(&url) {
+                        Ok(()) => Ok(RuntimeState::Running),
+                        Err(_) => Ok(RuntimeState::Degraded),
+                    }
+                }
+                Ok(_) => Ok(RuntimeState::Running),
+                Err(_) => Ok(RuntimeState::Unknown),
+            }
+        }
+        other => bail!("service `{service_name}` uses unsupported manager `{other}`"),
+    }
+}
+
+fn should_start_for_bring_up(service_name: &str, state: RuntimeState) -> bool {
+    match state {
+        RuntimeState::Stopped | RuntimeState::Unknown => true,
+        RuntimeState::Degraded if service_name == "mempool" => true,
+        RuntimeState::Running | RuntimeState::Degraded => false,
+    }
+}
+
+fn wait_for_mempool_readiness(env_resolver: &dyn EnvResolver) -> Result<()> {
+    let url = mempool_health_url(env_resolver);
+    let mut delay = Duration::from_secs(1);
+
+    for attempt in 1..=5 {
+        match probe_http_200(&url) {
+            Ok(()) => return Ok(()),
+            Err(err) if attempt == 5 => {
+                bail!("mempool did not become ready at {url}: {err}");
+            }
+            Err(_) => {
+                thread::sleep(delay);
+                delay = std::cmp::min(delay * 2, Duration::from_secs(8));
+            }
+        }
+    }
+
+    bail!("mempool did not become ready at {url}")
 }
 
 pub(crate) struct PlanExecutionResult {
