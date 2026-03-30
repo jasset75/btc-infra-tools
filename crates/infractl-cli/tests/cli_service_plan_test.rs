@@ -1,6 +1,4 @@
 mod common;
-#[path = "common/repo_root.rs"]
-mod repo_root;
 #[path = "common/unique_fixture_dir.rs"]
 mod unique_fixture_dir;
 
@@ -8,7 +6,6 @@ use std::fs;
 use std::process::Command;
 
 use common::belter_bin::belter_bin;
-use repo_root::repo_root;
 use unique_fixture_dir::unique_fixture_dir;
 
 #[test]
@@ -42,7 +39,7 @@ env_file = "${MEMPOOL_ENV_FILE}"
             "start",
             "mempool",
         ])
-        .current_dir(repo_root())
+        .current_dir(&fixture_dir)
         .env("MEMPOOL_COMPOSE_FILE", "/tmp/base.yml")
         .env("MEMPOOL_COMPOSE_OVERRIDE", "/tmp/override.yml")
         .env("MEMPOOL_PROJECT", "docker")
@@ -97,7 +94,7 @@ env_file = "${MEMPOOL_ENV_FILE}"
             "start",
             "mempool",
         ])
-        .current_dir(repo_root())
+        .current_dir(&fixture_dir)
         .env("MEMPOOL_ENV_FILE", env_file_path.to_str().expect("utf8 path"))
         .output()
         .expect("failed to execute process");
@@ -138,7 +135,7 @@ unit = "${STRATUM_LAUNCHD_UNIT}"
             "restart",
             "stratum",
         ])
-        .current_dir(repo_root())
+        .current_dir(&fixture_dir)
         .env("STRATUM_LAUNCHD_UNIT", "system/io.btc.public-pool")
         .output()
         .expect("failed to execute process");
