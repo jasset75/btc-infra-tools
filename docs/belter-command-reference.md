@@ -180,7 +180,11 @@ belter info pool --url http://192.0.2.10:3334/api/info
 
 ### `service list`
 - Parameters: none
-- Behavior: scaffold static list.
+- Behavior:
+  - Loads configured services from `belter.toml`.
+  - Returns configured service names in stable sorted order.
+  - Includes each service manager and declared `depends_on` values when present.
+  - `--json`: returns a `data.services` array with `service`, `manager`, and optional `depends_on`.
 
 ### `service status [name]`
 - Scope: `local-only`

@@ -24,9 +24,9 @@ impl<'a> ServiceCommandRequest<'a> {
             .as_ref()
             .ok_or_else(|| anyhow!("missing [service] section"))?;
 
-        let service = services.get(self.service_name).ok_or_else(|| {
-            anyhow!("service `{}` not found in config", self.service_name)
-        })?;
+        let service = services
+            .get(self.service_name)
+            .ok_or_else(|| anyhow!("service `{}` not found in config", self.service_name))?;
 
         if service.manager.trim().is_empty() {
             bail!("service `{}` has an empty `manager`", self.service_name);
@@ -70,12 +70,10 @@ impl<'a> ServiceCommandRequest<'a> {
         service: &ServiceConfig,
         resolver: &dyn EnvResolver,
     ) -> Result<Operation> {
-        let compose_file = service.compose_file.as_deref().ok_or_else(|| {
-            anyhow!(
-                "service `{}` is missing `compose_file`",
-                self.service_name
-            )
-        })?;
+        let compose_file = service
+            .compose_file
+            .as_deref()
+            .ok_or_else(|| anyhow!("service `{}` is missing `compose_file`", self.service_name))?;
         let compose_file = expand_placeholders(compose_file, resolver)?;
 
         let compose_override = service

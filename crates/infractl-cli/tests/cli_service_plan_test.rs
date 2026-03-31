@@ -43,7 +43,10 @@ env_file = "${MEMPOOL_ENV_FILE}"
         .env("MEMPOOL_COMPOSE_FILE", "/tmp/base.yml")
         .env("MEMPOOL_COMPOSE_OVERRIDE", "/tmp/override.yml")
         .env("MEMPOOL_PROJECT", "docker")
-        .env("MEMPOOL_ENV_FILE", env_file_path.to_str().expect("utf8 path"))
+        .env(
+            "MEMPOOL_ENV_FILE",
+            env_file_path.to_str().expect("utf8 path"),
+        )
         .output()
         .expect("failed to execute process");
 
@@ -95,7 +98,10 @@ env_file = "${MEMPOOL_ENV_FILE}"
             "mempool",
         ])
         .current_dir(&fixture_dir)
-        .env("MEMPOOL_ENV_FILE", env_file_path.to_str().expect("utf8 path"))
+        .env(
+            "MEMPOOL_ENV_FILE",
+            env_file_path.to_str().expect("utf8 path"),
+        )
         .output()
         .expect("failed to execute process");
 
@@ -196,7 +202,10 @@ depends_on = ["bitcoind", "podman_runtime"]
             "mempool",
         ])
         .current_dir(&fixture_dir)
-        .env("MEMPOOL_ENV_FILE", env_file_path.to_str().expect("utf8 path"))
+        .env(
+            "MEMPOOL_ENV_FILE",
+            env_file_path.to_str().expect("utf8 path"),
+        )
         .env("BITCOIND_LAUNCHD_UNIT", "system/com.bitcoind.node")
         .env("PODMAN_MACHINE_NAME", "podman-machine-default")
         .output()

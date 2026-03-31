@@ -7,7 +7,12 @@ The project follows semantic versioning.
 ## [Unreleased]
 
 This section includes implemented changes that are not released yet.
-No unreleased changes yet.
+
+### Added
+- Implemented real `service list` with config-driven discovery from `belter.toml`.
+
+### Changed
+- Updated `service list` output to report the configured services, their managers, and declared dependencies in stable sorted order for both text and `--json`.
 
 ## [0.1.1] - 2026-03-31
 

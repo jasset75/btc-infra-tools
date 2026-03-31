@@ -119,7 +119,9 @@ fn summarize_pool_info(url: &str, info: PoolInfoResponse) -> PoolHealthData {
     let best = info.high_scores.first();
     let agent = info.user_agents.first();
     let best_share = best.map(|entry| entry.best_difficulty);
-    let hashrate_ths = agent.and_then(|entry| entry.total_hash_rate).map(|value| value / 1e12);
+    let hashrate_ths = agent
+        .and_then(|entry| entry.total_hash_rate)
+        .map(|value| value / 1e12);
 
     PoolHealthData {
         url: url.to_string(),
@@ -197,7 +199,11 @@ fn fetch_pool_info(url: &str) -> Result<PoolInfoResponse> {
         .ok_or_else(|| anyhow::anyhow!("invalid HTTP response from {}", endpoint.authority()))?;
     let status_line = response.lines().next().unwrap_or_default();
     if !status_line.contains(" 200 ") {
-        bail!("unexpected HTTP status from {}: {}", endpoint.authority(), status_line);
+        bail!(
+            "unexpected HTTP status from {}: {}",
+            endpoint.authority(),
+            status_line
+        );
     }
 
     serde_json::from_str(body).with_context(|| format!("failed to parse JSON from {url}"))
@@ -288,7 +294,11 @@ mod tests {
     #[test]
     fn pool_info_url_prefers_explicit_url() {
         assert_eq!(
-            pool_info_url(Some("ignored"), 9999, Some("http://192.0.2.10:3334/api/info")),
+            pool_info_url(
+                Some("ignored"),
+                9999,
+                Some("http://192.0.2.10:3334/api/info")
+            ),
             "http://192.0.2.10:3334/api/info"
         );
     }

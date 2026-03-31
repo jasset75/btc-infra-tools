@@ -34,7 +34,15 @@ pub(crate) fn emit<W: Write>(
     command: &str,
     message: &str,
 ) -> Result<()> {
-    let out = output_envelope(clock, command, "ok", message, dry_run, Value::Null, Vec::new());
+    let out = output_envelope(
+        clock,
+        command,
+        "ok",
+        message,
+        dry_run,
+        Value::Null,
+        Vec::new(),
+    );
 
     if json {
         writeln!(stdout, "{}", serde_json::to_string_pretty(&out)?)?;

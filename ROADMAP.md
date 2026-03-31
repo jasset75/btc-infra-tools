@@ -20,7 +20,7 @@ Goal:
 - remove the most visible operator-facing scaffolds in the `service` command group.
 
 Planned:
-- [ ] Replace static `service list` with config-driven discovery
+- [x] Replace static `service list` with config-driven discovery
 - [ ] Implement real `service status` for all configured services (`service status` without `name`)
 - [ ] Implement real `service logs <name>`
 - [ ] Add integration tests for aggregated service status and logs

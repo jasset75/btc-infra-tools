@@ -64,7 +64,10 @@ pub(crate) enum ConfigCommand {
         force: bool,
     },
     Validate {
-        #[arg(long, help = "Append missing required service blocks to config before validating")]
+        #[arg(
+            long,
+            help = "Append missing required service blocks to config before validating"
+        )]
         write_missing: bool,
     },
     Show,

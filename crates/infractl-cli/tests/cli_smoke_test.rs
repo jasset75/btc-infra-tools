@@ -10,12 +10,33 @@ use unique_fixture_dir::unique_fixture_dir;
 
 #[test]
 fn test_cli_dry_run_parse() {
+    let fixture_dir = unique_fixture_dir();
+    fs::create_dir_all(&fixture_dir).expect("fixture dir should be created");
+    let config_path = fixture_dir.join("belter.toml");
+    fs::write(
+        &config_path,
+        r#"
+[service.bitcoind]
+manager = "launchd"
+unit = "system/com.bitcoind.node"
+"#,
+    )
+    .expect("config should be written");
+
     let output = Command::new(belter_bin())
-        .args(["--dry-run", "service", "list"])
+        .args([
+            "--config",
+            config_path.to_str().expect("utf8 path"),
+            "--dry-run",
+            "service",
+            "list",
+        ])
         .output()
         .expect("failed to execute process");
 
     assert!(output.status.success());
+
+    fs::remove_dir_all(&fixture_dir).expect("fixture dir should be removed");
 }
 
 #[test]
@@ -69,7 +90,10 @@ depends_on = ["bitcoind", "podman_runtime"]
         .current_dir(&fixture_dir)
         .env("BITCOIND_LAUNCHD_UNIT", "system/com.bitcoind.node")
         .env("PODMAN_MACHINE_NAME", "podman-machine-default")
-        .env("MEMPOOL_ENV_FILE", env_file_path.to_str().expect("utf8 path"))
+        .env(
+            "MEMPOOL_ENV_FILE",
+            env_file_path.to_str().expect("utf8 path"),
+        )
         .env("MEMPOOL_COMPOSE_FILE", "/tmp/base.yml")
         .env("MEMPOOL_COMPOSE_OVERRIDE", "/tmp/override.yml")
         .env("MEMPOOL_PROJECT", "docker")

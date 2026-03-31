@@ -14,21 +14,20 @@ mod output;
 mod runtime;
 
 use crate::cli::{
-    Cli, Command, ConfigCommand, HealthCommand, InfoCommand, RunCommand, ServiceCommand,
-    TuiCommand,
+    Cli, Command, ConfigCommand, HealthCommand, InfoCommand, RunCommand, ServiceCommand, TuiCommand,
 };
 use crate::commands::config::{init_config_file, validate_config_file};
 use crate::commands::health::{PoolHealthRequest, emit_pool_health};
 use crate::commands::service::{
-    StatusEmitCtx, emit_plan, emit_status, execute_service_bring_up_from_config,
+    StatusEmitCtx, emit_list, emit_plan, emit_status, execute_service_bring_up_from_config,
     execute_service_command_from_config,
 };
-use crate::output::{emit, error_envelope};
 #[cfg(test)]
 use crate::output::output_envelope;
-use crate::runtime::{DotenvLoader, ProcessDotenvLoader, RuntimeDeps};
+use crate::output::{emit, error_envelope};
 #[cfg(test)]
 use crate::runtime::NoopDotenvLoader;
+use crate::runtime::{DotenvLoader, ProcessDotenvLoader, RuntimeDeps};
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
@@ -138,36 +137,29 @@ fn run<C: Clock, E: EnvResolver, D: DotenvLoader, O: Write>(
             ),
         },
         Command::Service { command } => match command {
-            ServiceCommand::List => emit(
-                &deps.clock,
-                stdout,
-                cli.json,
-                cli.dry_run,
-                "service.list",
-                "configured services: bitcoind, stratum, mempool",
-            ),
-            ServiceCommand::Status { name, ui } => {
-                match name {
-                    Some(service_name) => emit_status(StatusEmitCtx {
-                        clock: &deps.clock,
-                        stdout,
-                        json: cli.json,
-                        dry_run: cli.dry_run,
-                        config_path: &cli.config,
-                        env_resolver: &deps.env_resolver,
-                        service_name,
-                        ui_mode: ui.effective(),
-                    }),
-                    None => emit(
-                        &deps.clock,
-                        stdout,
-                        cli.json,
-                        cli.dry_run,
-                        "service.status",
-                        &format!("status target=all ui={:?}", ui.effective()),
-                    ),
-                }
+            ServiceCommand::List => {
+                emit_list(&deps.clock, stdout, cli.json, cli.dry_run, &cli.config)
             }
+            ServiceCommand::Status { name, ui } => match name {
+                Some(service_name) => emit_status(StatusEmitCtx {
+                    clock: &deps.clock,
+                    stdout,
+                    json: cli.json,
+                    dry_run: cli.dry_run,
+                    config_path: &cli.config,
+                    env_resolver: &deps.env_resolver,
+                    service_name,
+                    ui_mode: ui.effective(),
+                }),
+                None => emit(
+                    &deps.clock,
+                    stdout,
+                    cli.json,
+                    cli.dry_run,
+                    "service.status",
+                    &format!("status target=all ui={:?}", ui.effective()),
+                ),
+            },
             ServiceCommand::Start { name } => emit_plan(
                 &deps.clock,
                 stdout,
@@ -251,28 +243,24 @@ fn run<C: Clock, E: EnvResolver, D: DotenvLoader, O: Write>(
             ),
         },
         Command::Run { command } => match command {
-            RunCommand::Action { id } => {
-                emit(
-                    &deps.clock,
-                    stdout,
-                    cli.json,
-                    cli.dry_run,
-                    "run.action",
-                    &format!("action={id}"),
-                )
-            }
+            RunCommand::Action { id } => emit(
+                &deps.clock,
+                stdout,
+                cli.json,
+                cli.dry_run,
+                "run.action",
+                &format!("action={id}"),
+            ),
         },
         Command::Tui { command } => match command {
-            TuiCommand::Dashboard => {
-                emit(
-                    &deps.clock,
-                    stdout,
-                    cli.json,
-                    cli.dry_run,
-                    "tui.dashboard",
-                    "starting dashboard",
-                )
-            }
+            TuiCommand::Dashboard => emit(
+                &deps.clock,
+                stdout,
+                cli.json,
+                cli.dry_run,
+                "tui.dashboard",
+                "starting dashboard",
+            ),
         },
     }
 }
@@ -310,20 +298,105 @@ mod tests {
 
     #[test]
     fn run_renders_dry_run_service_list() {
+        let fixture_dir = unique_fixture_dir();
+        fs::create_dir_all(&fixture_dir).expect("fixture dir should be created");
+        let config_path = fixture_dir.join("belter.toml");
+        fs::write(
+            &config_path,
+            r#"
+[service.stratum]
+manager = "launchd"
+unit = "system/io.btc.public-pool"
+depends_on = ["bitcoind"]
+
+[service.bitcoind]
+manager = "launchd"
+unit = "system/com.bitcoind.node"
+
+[service.mempool]
+manager = "podman_compose"
+compose_file = "/tmp/base.yml"
+depends_on = ["bitcoind", "podman_runtime"]
+"#,
+        )
+        .expect("config should be written");
+
         let clock = FixedClock::new("2026-03-12T10:00:00Z");
         let deps = RuntimeDeps {
             clock,
             env_resolver: FixedEnvResolver::new(HashMap::new()),
             dotenv_loader: NoopDotenvLoader,
         };
-        let cli = Cli::parse_from(["belter", "--dry-run", "service", "list"]);
+        let cli = Cli::parse_from([
+            "belter",
+            "--config",
+            config_path.to_str().expect("utf8 path"),
+            "--dry-run",
+            "service",
+            "list",
+        ]);
         let mut stdout = Vec::new();
 
         run(&deps, &cli, &mut stdout).expect("run should succeed");
 
         let rendered = String::from_utf8(stdout).expect("stdout should be utf8");
         assert!(rendered.contains("[2026-03-12T10:00:00Z] service.list"));
-        assert!(rendered.contains("configured services: bitcoind, stratum, mempool"));
+        assert!(rendered.contains("listed 3 configured service(s)"));
+        assert!(rendered.contains("- bitcoind (launchd)"));
+        assert!(
+            rendered.contains("- mempool (podman_compose) depends_on=bitcoind, podman_runtime")
+        );
+        assert!(rendered.contains("- stratum (launchd) depends_on=bitcoind"));
+
+        fs::remove_dir_all(&fixture_dir).expect("fixture dir should be removed");
+    }
+
+    #[test]
+    fn run_renders_json_service_list_from_config() {
+        let fixture_dir = unique_fixture_dir();
+        fs::create_dir_all(&fixture_dir).expect("fixture dir should be created");
+        let config_path = fixture_dir.join("belter.toml");
+        fs::write(
+            &config_path,
+            r#"
+[service.mempool]
+manager = "podman_compose"
+compose_file = "/tmp/base.yml"
+depends_on = ["bitcoind", "podman_runtime"]
+
+[service.bitcoind]
+manager = "launchd"
+unit = "system/com.bitcoind.node"
+"#,
+        )
+        .expect("config should be written");
+
+        let clock = FixedClock::new("2026-03-12T10:00:00Z");
+        let deps = RuntimeDeps {
+            clock,
+            env_resolver: FixedEnvResolver::new(HashMap::new()),
+            dotenv_loader: NoopDotenvLoader,
+        };
+        let cli = Cli::parse_from([
+            "belter",
+            "--config",
+            config_path.to_str().expect("utf8 path"),
+            "--json",
+            "service",
+            "list",
+        ]);
+        let mut stdout = Vec::new();
+
+        run(&deps, &cli, &mut stdout).expect("run should succeed");
+
+        let rendered = String::from_utf8(stdout).expect("stdout should be utf8");
+        assert!(rendered.contains("\"command\": \"service.list\""));
+        assert!(rendered.contains("\"message\": \"listed 2 configured service(s)\""));
+        assert!(rendered.contains("\"service\": \"bitcoind\""));
+        assert!(rendered.contains("\"service\": \"mempool\""));
+        assert!(rendered.contains("\"manager\": \"podman_compose\""));
+
+        fs::remove_dir_all(&fixture_dir).expect("fixture dir should be removed");
     }
 
     #[test]
@@ -424,8 +497,12 @@ manager = "launchd"
                     &error.to_string(),
                     cli.dry_run,
                 );
-                writeln!(&mut stdout, "{}", serde_json::to_string_pretty(&out).expect("serialize error envelope"))
-                    .expect("stdout write should succeed");
+                writeln!(
+                    &mut stdout,
+                    "{}",
+                    serde_json::to_string_pretty(&out).expect("serialize error envelope")
+                )
+                .expect("stdout write should succeed");
                 ExitCode::from(1)
             }
         };

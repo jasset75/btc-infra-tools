@@ -11,8 +11,8 @@ use serde::Serialize;
 use serde_json::json;
 use std::collections::HashSet;
 use std::fs;
+use std::io::Read;
 use std::io::Write;
-use std::io::{Read};
 use std::net::TcpStream;
 use std::path::PathBuf;
 use std::thread;
@@ -21,6 +21,14 @@ use std::time::Duration;
 const LAUNCHD_MANAGER: &str = "launchd";
 const PODMAN_COMPOSE_MANAGER: &str = "podman_compose";
 const PODMAN_MACHINE_MANAGER: &str = "podman_machine";
+
+#[derive(Serialize)]
+struct ServiceListItem {
+    service: String,
+    manager: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    depends_on: Vec<String>,
+}
 
 #[derive(Serialize)]
 struct ServiceStatusData {
@@ -48,7 +56,13 @@ struct ServiceStatusData {
 }
 
 impl ServiceStatusData {
-    fn launchd(service: &str, unit: String, state: &str, pid: Option<i32>, query_error: Option<String>) -> Self {
+    fn launchd(
+        service: &str,
+        unit: String,
+        state: &str,
+        pid: Option<i32>,
+        query_error: Option<String>,
+    ) -> Self {
         Self {
             service: service.to_string(),
             manager: LAUNCHD_MANAGER.to_string(),
@@ -135,6 +149,86 @@ struct StatusComputation {
     data: ServiceStatusData,
 }
 
+pub(crate) fn emit_list<W: Write>(
+    clock: &dyn Clock,
+    stdout: &mut W,
+    json: bool,
+    dry_run: bool,
+    config_path: &PathBuf,
+) -> Result<()> {
+    let raw = fs::read_to_string(config_path)
+        .with_context(|| format!("failed to read config file {}", config_path.display()))?;
+    let config: BelterConfig = toml::from_str(&raw)
+        .with_context(|| format!("failed to parse TOML from {}", config_path.display()))?;
+
+    let mut services: Vec<ServiceListItem> = config
+        .service
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(service, cfg)| ServiceListItem {
+            service,
+            manager: cfg.manager,
+            depends_on: cfg.depends_on.unwrap_or_default(),
+        })
+        .collect();
+    services.sort_by(|a, b| a.service.cmp(&b.service));
+
+    let out = output_envelope(
+        clock,
+        "service.list",
+        "ok",
+        &format!("listed {} configured service(s)", services.len()),
+        dry_run,
+        json!({ "services": services }),
+        Vec::new(),
+    );
+
+    if json {
+        writeln!(stdout, "{}", serde_json::to_string_pretty(&out)?)?;
+    } else {
+        writeln!(stdout, "[{}] {}: {}", out.ts, out.command, out.message)?;
+        let services = out
+            .data
+            .get("services")
+            .and_then(|value| value.as_array())
+            .cloned()
+            .unwrap_or_default();
+
+        for service in services {
+            let name = service
+                .get("service")
+                .and_then(|value| value.as_str())
+                .unwrap_or("unknown");
+            let manager = service
+                .get("manager")
+                .and_then(|value| value.as_str())
+                .unwrap_or("unknown");
+            let depends_on = service
+                .get("depends_on")
+                .and_then(|value| value.as_array())
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(|item| item.as_str())
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+
+            if depends_on.is_empty() {
+                writeln!(stdout, "- {name} ({manager})")?;
+            } else {
+                writeln!(
+                    stdout,
+                    "- {name} ({manager}) depends_on={}",
+                    depends_on.join(", ")
+                )?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
 pub(crate) fn emit_status<W: Write>(ctx: StatusEmitCtx<'_, W>) -> Result<()> {
     let raw = fs::read_to_string(ctx.config_path)
         .with_context(|| format!("failed to read config file {}", ctx.config_path.display()))?;
@@ -185,7 +279,10 @@ pub(crate) fn emit_status<W: Write>(ctx: StatusEmitCtx<'_, W>) -> Result<()> {
     )
 }
 
-fn compute_status(ctx: &StatusEmitCtx<'_, impl Write>, service: &infractl_core::config::ServiceConfig) -> Result<StatusComputation> {
+fn compute_status(
+    ctx: &StatusEmitCtx<'_, impl Write>,
+    service: &infractl_core::config::ServiceConfig,
+) -> Result<StatusComputation> {
     if service.manager == LAUNCHD_MANAGER {
         let unit_tmpl = service
             .unit
@@ -204,7 +301,8 @@ fn compute_status(ctx: &StatusEmitCtx<'_, impl Write>, service: &infractl_core::
             "status target={} ui={:?} state={state}",
             ctx.service_name, ctx.ui_mode
         );
-        let status_data = ServiceStatusData::launchd(ctx.service_name, unit, state, pid, query_error);
+        let status_data =
+            ServiceStatusData::launchd(ctx.service_name, unit, state, pid, query_error);
         return Ok(StatusComputation {
             message,
             data: status_data,
@@ -334,10 +432,9 @@ fn compute_status(ctx: &StatusEmitCtx<'_, impl Write>, service: &infractl_core::
 
     if service.manager == PODMAN_MACHINE_MANAGER {
         let service_name = ctx.service_name.to_string();
-        let machine_tmpl = service
-            .machine
-            .as_deref()
-            .ok_or_else(|| anyhow::anyhow!("service `{}` is missing `machine`", ctx.service_name))?;
+        let machine_tmpl = service.machine.as_deref().ok_or_else(|| {
+            anyhow::anyhow!("service `{}` is missing `machine`", ctx.service_name)
+        })?;
         let machine = match expand_placeholders(machine_tmpl, ctx.env_resolver) {
             Ok(value) => value,
             Err(err) => {
@@ -364,12 +461,8 @@ fn compute_status(ctx: &StatusEmitCtx<'_, impl Write>, service: &infractl_core::
             "status target={} ui={:?} state={state}",
             ctx.service_name, ctx.ui_mode
         );
-        let status_data = ServiceStatusData::podman_machine(
-            ctx.service_name,
-            Some(machine),
-            state,
-            query_error,
-        );
+        let status_data =
+            ServiceStatusData::podman_machine(ctx.service_name, Some(machine), state, query_error);
         return Ok(StatusComputation {
             message,
             data: status_data,
@@ -438,7 +531,11 @@ fn probe_http_200(url: &str) -> Result<()> {
         return Ok(());
     }
 
-    bail!("unexpected HTTP status from {}: {}", endpoint.authority(), status_line)
+    bail!(
+        "unexpected HTTP status from {}: {}",
+        endpoint.authority(),
+        status_line
+    )
 }
 
 struct HttpEndpoint {
@@ -474,7 +571,10 @@ fn parse_http_url(url: &str) -> Result<HttpEndpoint> {
     Ok(HttpEndpoint { host, port, path })
 }
 
-fn unknown_status(ctx: &StatusEmitCtx<'_, impl Write>, data: ServiceStatusData) -> StatusComputation {
+fn unknown_status(
+    ctx: &StatusEmitCtx<'_, impl Write>,
+    data: ServiceStatusData,
+) -> StatusComputation {
     StatusComputation {
         message: format!(
             "status target={} ui={:?} state=unknown",

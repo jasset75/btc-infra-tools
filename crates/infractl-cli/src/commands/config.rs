@@ -48,15 +48,12 @@ pub(crate) fn validate_config_file(
         }
     }
 
-    let services = config
-        .service
-        .as_ref()
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "missing [service] section.\n\nExample:\n{}",
-                example_service_block("bitcoind")
-            )
-        })?;
+    let services = config.service.as_ref().ok_or_else(|| {
+        anyhow::anyhow!(
+            "missing [service] section.\n\nExample:\n{}",
+            example_service_block("bitcoind")
+        )
+    })?;
     if services.is_empty() {
         bail!("missing service definitions under [service]");
     }
@@ -73,15 +70,12 @@ pub(crate) fn validate_config_file(
     for (name, service) in services {
         match service.manager.as_str() {
             LAUNCHD_MANAGER => {
-                let unit_tmpl = service
-                    .unit
-                    .as_deref()
-                    .ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "service `{name}` is missing `unit`.\n\nExample:\n{}",
-                            example_service_block(name)
-                        )
-                    })?;
+                let unit_tmpl = service.unit.as_deref().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "service `{name}` is missing `unit`.\n\nExample:\n{}",
+                        example_service_block(name)
+                    )
+                })?;
                 resolve_placeholder_for_field(env_resolver, name, "unit", unit_tmpl)?;
             }
             PODMAN_COMPOSE_MANAGER => {
@@ -163,7 +157,8 @@ fn append_missing_required_services(
         raw.push('\n');
     }
 
-    fs::write(path, raw).with_context(|| format!("failed to write config file {}", path.display()))?;
+    fs::write(path, raw)
+        .with_context(|| format!("failed to write config file {}", path.display()))?;
     Ok(missing.into_iter().map(ToOwned::to_owned).collect())
 }
 
@@ -181,9 +176,7 @@ fn resolve_placeholder_for_field(
                     "service `{service_name}` field `{field}` requires missing env var `{var}`. Set it in `.env` or export it in your shell (example: `export {var}=...`). Template: `{template}`"
                 );
             }
-            bail!(
-                "service `{service_name}` failed to resolve `{field}` placeholder(s): {err}"
-            );
+            bail!("service `{service_name}` failed to resolve `{field}` placeholder(s): {err}");
         }
     }
 }
@@ -299,7 +292,10 @@ env_file = "${MEMPOOL_ENV_FILE}"
                 "/tmp/mempool.override.yml".to_string(),
             ),
             ("MEMPOOL_PROJECT".to_string(), "mempool".to_string()),
-            ("MEMPOOL_ENV_FILE".to_string(), "/tmp/mempool.env".to_string()),
+            (
+                "MEMPOOL_ENV_FILE".to_string(),
+                "/tmp/mempool.env".to_string(),
+            ),
         ]));
 
         let message = validate_config_file(&env, &path, false).expect("config should validate");
@@ -330,7 +326,10 @@ compose_file = "/tmp/mempool.yml"
         let env = FixedEnvResolver::new(HashMap::new());
         let err =
             validate_config_file(&env, &path, false).expect_err("config should fail validation");
-        assert!(err.to_string().contains("missing required service `stratum`"));
+        assert!(
+            err.to_string()
+                .contains("missing required service `stratum`")
+        );
 
         remove_fixture_dir(&dir);
     }
@@ -404,7 +403,10 @@ unit = "${BITCOIND_LAUNCHD_UNIT}"
                 "/tmp/mempool.override.yml".to_string(),
             ),
             ("MEMPOOL_PROJECT".to_string(), "mempool".to_string()),
-            ("MEMPOOL_ENV_FILE".to_string(), "/tmp/mempool.env".to_string()),
+            (
+                "MEMPOOL_ENV_FILE".to_string(),
+                "/tmp/mempool.env".to_string(),
+            ),
         ]));
 
         let message = validate_config_file(&env, &path, true).expect("config should validate");

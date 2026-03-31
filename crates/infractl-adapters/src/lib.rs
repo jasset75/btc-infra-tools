@@ -39,9 +39,7 @@ impl LaunchdAdapter {
     }
 
     fn run_launchctl(&self, args: &[&str], unit: &str, action: &str) -> Result<()> {
-        let output = Command::new("launchctl")
-            .args(args)
-            .output()?;
+        let output = Command::new("launchctl").args(args).output()?;
 
         if output.status.success() {
             return Ok(());
@@ -97,7 +95,13 @@ impl PodmanComposeAdapter {
         compose_override: Option<&str>,
         project: Option<&str>,
     ) -> Result<()> {
-        self.run_compose(compose_file, compose_override, project, &["up", "-d"], "start")
+        self.run_compose(
+            compose_file,
+            compose_override,
+            project,
+            &["up", "-d"],
+            "start",
+        )
     }
 
     pub fn stop(
@@ -115,7 +119,13 @@ impl PodmanComposeAdapter {
         compose_override: Option<&str>,
         project: Option<&str>,
     ) -> Result<()> {
-        self.run_compose(compose_file, compose_override, project, &["down"], "restart")?;
+        self.run_compose(
+            compose_file,
+            compose_override,
+            project,
+            &["down"],
+            "restart",
+        )?;
         self.run_compose(
             compose_file,
             compose_override,
@@ -140,7 +150,11 @@ impl PodmanComposeAdapter {
         )?;
 
         let mut running = Vec::new();
-        for id in output.lines().map(str::trim).filter(|line| !line.is_empty()) {
+        for id in output
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+        {
             if self.container_is_running(id)? {
                 running.push(id.to_owned());
             }
@@ -231,7 +245,9 @@ impl PodmanComposeAdapter {
             .and_then(|item| item.get("State"))
             .and_then(|state| state.get("Running"))
             .and_then(Value::as_bool)
-            .ok_or_else(|| anyhow::anyhow!("podman inspect output missing `State.Running` field"))?;
+            .ok_or_else(|| {
+                anyhow::anyhow!("podman inspect output missing `State.Running` field")
+            })?;
 
         Ok(running)
     }
@@ -260,7 +276,9 @@ impl PodmanMachineAdapter {
             .and_then(|items| items.first())
             .and_then(|item| item.get("State"))
             .and_then(Value::as_str)
-            .ok_or_else(|| anyhow::anyhow!("podman machine inspect output missing `State` field"))?;
+            .ok_or_else(|| {
+                anyhow::anyhow!("podman machine inspect output missing `State` field")
+            })?;
 
         Ok(state.eq_ignore_ascii_case("running"))
     }
