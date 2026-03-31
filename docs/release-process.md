@@ -105,9 +105,25 @@ Suggested sequence:
 git add CHANGELOG.md Cargo.toml Cargo.lock README.md ROADMAP.md docs/release-process.md
 git commit -m "release: x.y.z"
 git tag -a vX.Y.Z -m "Release x.y.z"
+git push origin main --follow-tags
 ```
 
-If release artifacts or notes are published elsewhere, generate them from the finalized changelog.
+Publishing the commit is not enough.
+The release tag must exist on `origin`.
+
+Operational consequence:
+- `just install-latest-stable` on operator nodes fetches tags from `origin` and resolves the highest `v*` tag after fetch.
+- If the release tag was created locally but not pushed to `origin`, operator nodes will fail with "No release tags found after fetching from origin." or will stay pinned to an older stable tag.
+
+Minimum post-publish verification:
+
+```bash
+git ls-remote --tags origin
+```
+
+Confirm that `refs/tags/vX.Y.Z` is present before telling operators to install the latest stable release.
+
+If release artifacts or notes are published elsewhere, generate them from the finalized changelog after the tag is pushed.
 
 ### 7. Prepare the next iteration
 
@@ -122,6 +138,7 @@ After tagging:
 Beyond roadmap validation, changelog migration, and semantic versioning, also check:
 
 - Git consistency: no missing or duplicate release tag for the target version.
+- Remote publish consistency: the release tag exists on `origin`, not only in the local repository.
 - Date consistency: release heading date should match the actual publication date.
 - Documentation consistency: `README.md` and [belter-command-reference.md](/Users/juan/work/btc-infra-upstream/btc-infra-tools/docs/belter-command-reference.md) should not describe shipped commands as scaffold behavior unless that is an intentional release limitation.
 - Config compatibility: note any config migration or new required env vars in the release notes.
