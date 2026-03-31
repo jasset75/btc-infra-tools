@@ -63,6 +63,7 @@ Common day-to-day tasks:
 ```bash
 mise exec -- just build
 mise exec -- just install
+mise exec -- just install-latest-stable
 mise exec -- just check
 mise exec -- just clippy
 mise exec -- just clippy-fix
@@ -85,6 +86,18 @@ git pull --ff-only origin main
 mise exec -- cargo install --path crates/infractl-cli --locked --root ~/.local --force
 belter --version
 ```
+
+Tip: install the latest stable release from the newest tag:
+> *For nodes that should stay on the latest stable release instead of `main`:*
+```bash
+mise exec -- just install-latest-stable
+```
+
+This recipe:
+- fetches tags from `origin`,
+- checks out the newest local release tag,
+- reinstalls `belter`,
+- verifies the installed version.
 
 - `--force`: reinstalls even when Cargo would otherwise skip installation.
 - `--locked`: uses the repository `Cargo.lock` for reproducible dependency versions.

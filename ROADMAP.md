@@ -24,6 +24,7 @@ Planned:
 - [ ] Implement real `service status` for all configured services (`service status` without `name`)
 - [ ] Implement real `service logs <name>`
 - [ ] Add integration tests for aggregated service status and logs
+- [x] Add a `just` workflow to install the latest stable tagged release on operator nodes
 
 Why this release:
 - this closes the biggest UX gap after `bring-up` by making the service control plane feel complete enough for daily use.

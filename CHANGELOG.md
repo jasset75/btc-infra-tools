@@ -10,9 +10,11 @@ This section includes implemented changes that are not released yet.
 
 ### Added
 - Implemented real `service list` with config-driven discovery from `belter.toml`.
+- Added `just install-latest-stable` to install `belter` from the newest tagged release instead of the current branch tip.
 
 ### Changed
 - Updated `service list` output to report the configured services, their managers, and declared dependencies in stable sorted order for both text and `--json`.
+- Updated installation docs to distinguish installing from `main` versus installing the latest stable tagged release.
 
 ## [0.1.1] - 2026-03-31
 

@@ -10,6 +10,12 @@ install:
   cargo install --path crates/infractl-cli --locked --root ~/.local --force
   ~/.local/bin/belter --version
 
+install-latest-stable:
+  git fetch --tags origin
+  git checkout "$(git describe --tags --abbrev=0)"
+  cargo install --path crates/infractl-cli --locked --root ~/.local --force
+  ~/.local/bin/belter --version
+
 check:
   cargo check --workspace
 
