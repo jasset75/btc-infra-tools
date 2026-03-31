@@ -15,6 +15,7 @@ This section includes implemented changes that are not released yet.
 ### Changed
 - Updated `service list` output to report the configured services, their managers, and declared dependencies in stable sorted order for both text and `--json`.
 - Updated installation docs to distinguish installing from `main` versus installing the latest stable tagged release.
+- Hardened `just install-latest-stable` so it resolves the highest fetched `v*` tag instead of relying on `git describe` from the current checkout.
 
 ## [0.1.1] - 2026-03-31
 

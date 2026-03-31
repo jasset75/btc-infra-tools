@@ -95,7 +95,8 @@ mise exec -- just install-latest-stable
 
 This recipe:
 - fetches tags from `origin`,
-- checks out the newest local release tag,
+- resolves the highest `v*` release tag available locally after fetch,
+- checks out that release tag,
 - reinstalls `belter`,
 - verifies the installed version.
 

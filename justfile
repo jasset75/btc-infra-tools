@@ -11,8 +11,15 @@ install:
   ~/.local/bin/belter --version
 
 install-latest-stable:
+  #!/usr/bin/env zsh
+  set -eu
   git fetch --tags origin
-  git checkout "$(git describe --tags --abbrev=0)"
+  tag="$(git tag --list 'v*' --sort=-v:refname | head -n 1)"
+  if [[ -z "${tag}" ]]; then
+    echo "No release tags found after fetching from origin." >&2
+    exit 1
+  fi
+  git checkout "${tag}"
   cargo install --path crates/infractl-cli --locked --root ~/.local --force
   ~/.local/bin/belter --version
 
