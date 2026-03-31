@@ -249,18 +249,6 @@ fn run<C: Clock, E: EnvResolver, D: DotenvLoader, O: Write>(
                 "health.snapshot",
                 "snapshot generated",
             ),
-            HealthCommand::Pool(args) => emit_pool_health(
-                &deps.clock,
-                stdout,
-                cli.json,
-                cli.dry_run,
-                PoolHealthRequest {
-                    command_label: "health.pool",
-                    target: args.target.as_deref(),
-                    port: args.port,
-                    explicit_url: args.url.as_deref(),
-                },
-            ),
         },
         Command::Run { command } => match command {
             RunCommand::Action { id } => {

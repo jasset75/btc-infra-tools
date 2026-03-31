@@ -108,7 +108,6 @@ belter
   health
     check [--all | --id <ID>] [--ui <auto|cli|tui> | --tui]
     snapshot
-    pool [target] [--port <PORT> | --url <URL>]
   run
     action <id> [--dry-run]
   tui
@@ -282,23 +281,6 @@ belter --config belter.toml --dry-run --json service restart stratum
 - Scope: `local-only`
 - Parameters: none
 - Behavior: scaffold snapshot response.
-
-### `health pool`
-- Scope: `remote-capable`
-- Status: compatibility alias for `info pool`
-- Parameters:
-  - `target` (optional; host or IP, default: `127.0.0.1`)
-  - `--port <PORT>` (optional; default: `3334`)
-  - `--url <URL>` (optional; advanced override, mutually exclusive with `target`)
-- Behavior:
-  - Same behavior and output as `info pool`.
-  - Kept as a temporary alias while health-oriented pool checks are designed.
-
-Example:
-
-```bash
-belter health pool 192.0.2.10
-```
 
 ### `service bring-up <name>`
 - Scope: `local-only`

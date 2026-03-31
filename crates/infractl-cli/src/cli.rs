@@ -127,7 +127,6 @@ pub(crate) enum HealthCommand {
         ui: UiArgs,
     },
     Snapshot,
-    Pool(PoolTargetArgs),
 }
 
 #[derive(Debug, Subcommand)]
@@ -188,7 +187,6 @@ impl Command {
             Command::Health { command } => match command {
                 HealthCommand::Check { .. } => "health.check",
                 HealthCommand::Snapshot => "health.snapshot",
-                HealthCommand::Pool(..) => "health.pool",
             },
             Command::Run { command } => match command {
                 RunCommand::Action { .. } => "run.action",

@@ -96,7 +96,6 @@ mise exec -- cargo run -p belter -- service list
 mise exec -- cargo run -p belter -- info pool
 mise exec -- cargo run -p belter -- info pool 192.0.2.10
 mise exec -- cargo run -p belter -- health snapshot --json
-mise exec -- cargo run -p belter -- health pool 192.0.2.10
 ```
 
 ## Preconditions
