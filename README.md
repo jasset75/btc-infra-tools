@@ -6,6 +6,7 @@ Monorepo for `belter`, a Rust CLI/TUI for infrastructure operations.
 - Design decisions and initial scope: [Architecture](docs/architecture.md)
 - Current implemented architecture (with runtime flow): [Architecture (Current)](docs/architecture-btc-infra-tools.md)
 - Feature and release history: [CHANGELOG](CHANGELOG.md)
+- Release workflow: [docs/release-process.md](docs/release-process.md)
 - Planned work and upcoming features: [ROADMAP](ROADMAP.md)
 
 ## Workspace Layout
@@ -182,6 +183,10 @@ Feature delivery follows this loop:
 Versioning policy:
 - Each delivered feature should be recorded in `CHANGELOG.md`.
 - Project version should be bumped according to semantic versioning as features are released.
+- Releases should follow the documented [release process](docs/release-process.md), including roadmap validation, changelog finalization, semantic version alignment, quality gates, smoke validation, and git tagging.
+
+Current note:
+- `0.1.1` is the current release version.
 
 ## Git Hooks
 This repository uses `lefthook` to run local quality gates before push.

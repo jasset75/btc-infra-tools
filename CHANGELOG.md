@@ -7,6 +7,9 @@ The project follows semantic versioning.
 ## [Unreleased]
 
 This section includes implemented changes that are not released yet.
+No unreleased changes yet.
+
+## [0.1.1] - 2026-03-31
 
 ### Added
 - Added support for `manager = "podman_machine"`:

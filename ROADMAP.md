@@ -1,6 +1,7 @@
 # Roadmap
 
-This file tracks planned work only.
+This file tracks planned work.
+The latest released milestone may be kept here briefly as a transition reference.
 When a feature is implemented, move it to `CHANGELOG.md` under `Unreleased`.
 
 ## Release Strategy
@@ -16,10 +17,10 @@ Current versioning intent:
 
 ## 0.1.1
 
-Scope:
-- package the current `mempool`/Podman/bring-up work into the first operational follow-up release after `0.1.0`.
+Released:
+- 2026-03-31
 
-Included:
+Delivered:
 - [x] Support `manager = "podman_machine"` for `podman_runtime`
 - [x] Add `env_file` support for `podman_compose`
 - [x] Implement `service bring-up <name>` as a small dependency-aware orchestrator
@@ -29,8 +30,8 @@ Included:
 - [x] Harden CLI tests against local `.env` contamination and fixture collisions
 - [x] Update docs for bring-up, env ownership, and mempool readiness semantics
 
-Exit intent:
-- release once the current implemented scope is validated on the target node and documentation is aligned.
+Notes:
+- This release packages the current `mempool`/Podman/bring-up work into the first operational follow-up release after `0.1.0`.
 
 ## 0.1.2
 
