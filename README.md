@@ -21,10 +21,13 @@ Monorepo for `belter`, a Rust CLI/TUI for infrastructure operations.
 ### Belter CLI
 - Detailed command/flag reference: [docs/belter-command-reference.md](docs/belter-command-reference.md)
 - Current features:
-  - Config-driven `service start|stop|restart <name>` for `launchd` and `podman_compose`.
+  - Config-driven `service start|stop|restart <name>` for `launchd`, `podman_compose`, and `podman_machine`.
+  - `service bring-up <name>` as a small dependency-aware orchestrator.
   - `info pool [target]` for read-only public-pool metrics from local or remote hosts.
   - `${ENV_VAR}` expansion in service `unit`.
   - Automatic `.env` loading from current working directory.
+  - Per-service runtime env loading for `podman_compose` services via `env_file`.
+  - HTTP-aware `mempool` status and readiness checks.
   - Actionable launchd restart errors for target format and privilege requirements.
 
 ## Operator Setup (macOS, repo-local mise)
@@ -143,6 +146,33 @@ Placeholder notes for `.env.example`:
 - `<path_to_bitcoind_datadir>`: host datadir passed to `bitcoin-cli`, if used.
 - `<launchd_unit_for_bitcoind>`: full launchd target, for example `system/com.bitcoind.node`.
 - `<launchd_unit_for_stratum>`: full launchd target for local `public-pool`, for example `gui/501/io.btc.public-pool`.
+
+## Bring-Up Model
+
+`belter service bring-up <name>` is the current small orchestrator layer on top of the primitive `start|stop|restart` commands.
+
+Current behavior:
+- resolves `depends_on` from `belter.toml` as an acyclic local dependency graph,
+- loads any `env_file` declared by `podman_compose` services before planning or execution,
+- in real execution, skips dependencies already healthy/running,
+- in `--dry-run`, prints the full declared bring-up chain without consulting host runtime state,
+- emits structured events in JSON and text output so the operator can see what was skipped, started, or waited on.
+
+Current practical example:
+
+```bash
+belter --config belter.toml service bring-up mempool
+```
+
+For `mempool`, `bring-up` currently:
+- validates and starts `bitcoind` only if needed,
+- validates and starts `podman_runtime` only if needed,
+- starts `mempool` with its configured `env_file`,
+- waits for `http://${MEMPOOL_HOST}:${MEMPOOL_PORT}/api/v1/backend-info` to return `200`,
+- reports `running`, `degraded`, or `stopped` through `service status mempool`.
+
+Operational note:
+- `service status mempool` is stronger than a plain compose `ps`; it requires both running containers and successful HTTP readiness before returning `running`.
 
 ## Development Cycle
 Feature delivery follows this loop:

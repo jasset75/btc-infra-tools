@@ -146,16 +146,17 @@ belter
 1. Secret handling strategy: environment variables vs secret backend.
 2. Extensibility model: built-in adapters vs external plugin system.
 
-## Planned Dependency Model (Bring-Up v1)
+## Dependency Model (Bring-Up v1)
 
-To support `belter service bring-up <name>`, the configuration model is expected to grow from isolated service primitives into a small dependency graph.
+`belter service bring-up <name>` is now implemented as a small local orchestrator on top of the primitive manager actions.
 
 Design intent:
 - keep `start|stop|restart` as direct manager primitives,
-- add `bring-up` as an orchestration command that resolves dependencies, starts what is missing, and validates health in order,
-- model local runtime dependencies explicitly instead of hardcoding them inside service-specific logic.
+- add `bring-up` as a dependency-aware orchestration command,
+- model local runtime dependencies explicitly instead of hardcoding them inside service-specific logic,
+- stop short of becoming a long-running reconciler or service manager replacement.
 
-Planned configuration shape:
+Configuration shape:
 
 ```toml
 [service.bitcoind]
@@ -179,27 +180,40 @@ project = "${MEMPOOL_PROJECT}"
 depends_on = ["bitcoind", "podman_runtime"]
 ```
 
-Planned field meanings:
+Field meanings:
 - `depends_on`: ordered logical dependencies that must be healthy before a service bring-up can continue.
 - `manager = "podman_machine"`: runtime manager for Podman VM-backed availability on macOS.
 - `machine`: Podman machine logical name, for example `podman-machine-default`.
+- `env_file`: runtime env file to load for a `podman_compose` service before planning or execution.
 
-Planned v1 behavior:
+Current v1 behavior:
 - `service bring-up stratum`
-  - validate `bitcoind`,
-  - start `bitcoind` if needed,
-  - validate `bitcoind`,
-  - start `stratum`.
+  - resolves `depends_on = ["bitcoind"]`,
+  - starts `bitcoind` only if not already healthy,
+  - starts `stratum` only if needed.
 - `service bring-up mempool`
-  - validate `bitcoind`,
-  - validate `podman_runtime`,
-  - start missing dependencies in dependency order,
-  - validate dependencies,
-  - start `mempool`,
-  - run post-start HTTP checks.
+  - resolves `depends_on = ["bitcoind", "podman_runtime"]`,
+  - loads `env_file` for the `mempool` compose stack,
+  - starts only missing or unhealthy dependencies in dependency order,
+  - starts `mempool`,
+  - waits for `HTTP 200` on `/api/v1/backend-info`.
+
+Runtime semantics:
+- dry-run plans the full declared chain and does not consult runtime state,
+- real execution checks the current state of dependencies and skips healthy services,
+- `mempool` readiness is stronger than compose state:
+  - running containers plus successful HTTP probe are required for `running`,
+  - running containers with failed readiness become `degraded`.
+
+Operator-facing behavior:
+- bring-up emits structured events for:
+  - skipped healthy dependencies,
+  - services being started,
+  - readiness waiting,
+  - readiness success.
 
 Scope guardrails for this model:
 - dependency resolution remains local and acyclic,
 - only explicitly declared dependencies are traversed,
 - no scheduler, reconciliation loop, or background controller is introduced,
-- dependency health must remain explicit and actionable per manager.
+- dependency health remains explicit and actionable per manager.

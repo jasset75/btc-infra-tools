@@ -192,10 +192,15 @@ belter info pool --url http://192.0.2.10:3334/api/info
 - Behavior:
   - Loads `service.<name>` from config when `name` is provided.
   - `launchd` services: resolves `unit`, queries runtime status via `launchctl print`, and reports state in `data` (`running|stopped|unknown`) with optional `pid`.
-  - `podman_compose` services: resolves `compose_file`/`compose_override`/`project`, queries runtime status via `podman compose ... ps -q`, and reports:
-    - `data.state = running|stopped|unknown`
+  - `podman_compose` services: resolves `compose_file`/`compose_override`/`project`, filters container ids to containers whose Podman `State.Running` is actually `true`, and reports:
+    - `data.state = running|stopped|degraded|unknown`
     - `data.running_containers` (container ids when available)
     - `data.query_error` when runtime query cannot be completed.
+  - `mempool` has a stronger status contract:
+    - `running` requires running containers and `HTTP 200` from `/api/v1/backend-info`
+    - `degraded` means containers are up but readiness failed
+    - `health_url` is included in JSON output for machine-readable consumers.
+  - `podman_machine` services resolve `machine` and report `running|stopped|unknown`.
   - Unknown/unsupported managers return `state=unknown` with descriptive message.
   - `--dry-run`: does not query runtime state; returns a simulated status payload (`data.simulated = true`) and sets `dry_run = true` in the envelope.
   - `--json`: returns machine-readable envelope; command-level `status` indicates CLI execution success, while service runtime state is exposed in `data.state` when available.
@@ -297,66 +302,47 @@ belter health pool 192.0.2.10
 
 ### `service bring-up <name>`
 - Scope: `local-only`
-- Status: planned, not implemented yet.
 - Parameters:
   - `name` (required)
-- Intent:
-  - Provide a reboot-safe flow to bring a managed service back after host restart or maintenance.
-  - First specialized implementation target is `mempool` on macOS with Podman.
-  - Keep generic `service start|stop|restart` simple and manager-oriented.
 - Behavior:
-  - Dispatches to a service-specific bring-up workflow.
-  - First iteration supports `name = mempool`.
-  - Loads `.env` and resolves the configured `service.mempool` `compose_file`, `compose_override`, and `project`.
-  - For `mempool`, runs preflight checks before any compose lifecycle action:
-    - validate `podman` is installed,
-    - validate the configured compose files exist,
-    - validate `podman compose` is usable on the host,
-    - check Podman runtime availability and start `podman machine` when the VM exists but is stopped,
-    - fail fast with actionable diagnostics if the runtime cannot be reached.
-  - For `mempool`, runs controlled bring-up using the configured compose project:
-    - `podman compose ... up -d`
-  - For `mempool`, runs post-start validation:
-    - `podman compose ... ps`
-    - HTTP probes against:
-      - `/api/v1/backend-info`
-      - `/api/blocks/tip/height`
-      - `/api/mempool`
-  - Returns structured output that differentiates:
-    - preflight failure,
-    - compose bring-up failure,
-    - runtime started but HTTP validation failed,
-    - full success.
-- Retry policy for first iteration:
-  - Retries are reserved for transient readiness only, not for configuration or dependency errors.
-  - Candidate retry points:
-    - waiting for `podman machine` to become reachable after a successful start request,
-    - waiting for `podman compose ... ps` to show running containers after `up -d`,
-    - waiting for `mempool` HTTP endpoints to return healthy responses.
-  - Candidate non-retriable failures:
-    - missing `podman` binary,
-    - missing compose files,
-    - unusable `podman compose` provider,
-    - unresolved environment placeholders,
-    - invalid host port policy or known static config errors,
-    - authentication failures against Bitcoin RPC when clearly reported as such.
-  - Recommended initial backoff:
-    - `attempts = 5`
-    - `initial_delay = 1s`
-    - exponential factor `2`
-    - `max_delay = 8s`
-  - Design guidance:
-    - first implementation may use simple synchronous polling and sleep;
-    - introducing `tokio-retry` is acceptable later if async execution becomes justified by multiple readiness loops or richer orchestration.
-- Non-goals for the first iteration:
-  - no mutation of upstream `mempool` compose files,
-  - no secret creation or rotation,
-  - no automatic patching of invalid host port mappings,
-  - no Bitcoin Core RPC credential provisioning.
-- Operator assumptions:
-  - `service.mempool` points to external compose files, not to a pristine upstream clone,
-  - the compose override already encodes the correct RPC host for Podman on macOS (`host.containers.internal`),
-  - the published web port is non-privileged (recommended: `8080`).
+  - Resolves `depends_on` from config and traverses them in dependency order.
+  - Uses the primitive manager actions internally; `bring-up` does not introduce a background controller or scheduler.
+  - Loads `env_file` for `podman_compose` services before planning or execution.
+  - `--dry-run` is deterministic:
+    - it shows the full declared bring-up chain,
+    - it does not consult the real runtime state of the host.
+  - Real execution is state-aware:
+    - healthy dependencies are skipped,
+    - stopped or unknown dependencies are started,
+    - `mempool` in `degraded` state is brought up again.
+  - Emits structured events such as:
+    - dependency skipped because already healthy,
+    - dependency being started,
+    - waiting for readiness,
+    - readiness reached.
+
+Current implemented specialization:
+- `service bring-up mempool`
+  - resolves `depends_on = ["bitcoind", "podman_runtime"]`,
+  - ensures `service.mempool.env_file` is loaded,
+  - starts `bitcoind` only if not already healthy,
+  - starts `podman_runtime` only if not already healthy,
+  - starts `mempool`,
+  - waits for `http://${MEMPOOL_HOST}:${MEMPOOL_PORT}/api/v1/backend-info` to return `200`,
+  - fails if readiness does not stabilize within the built-in retry loop.
+
+Readiness policy:
+- current implementation uses synchronous polling with exponential backoff
+- attempts: `5`
+- initial delay: `1s`
+- maximum delay: `8s`
+- readiness target for `mempool`: `/api/v1/backend-info`
+
+Current design limits:
+- no reconciliation loop or daemon mode,
+- no automatic secret provisioning,
+- no mutation of upstream `mempool` compose files,
+- no automatic repair of bad compose configuration.
 
 Examples:
 
@@ -364,6 +350,16 @@ Examples:
 belter service bring-up mempool
 belter --json service bring-up mempool
 belter --dry-run service bring-up mempool
+```
+
+Typical text-mode events for `mempool`:
+
+```text
+[info] bring_up.skipped: `bitcoind` already healthy; skipping
+[info] bring_up.starting: starting `podman_runtime`
+[info] bring_up.starting: starting `mempool`
+[info] bring_up.waiting_readiness: waiting for mempool HTTP readiness
+[info] bring_up.ready: mempool backend responded with HTTP 200
 ```
 
 ## run

@@ -9,6 +9,19 @@ The project follows semantic versioning.
 This section includes implemented changes that are not released yet.
 
 ### Added
+- Added support for `manager = "podman_machine"`:
+  - `service start|stop|restart|status podman_runtime`
+  - `machine = "${PODMAN_MACHINE_NAME}"` in config.
+- Added `env_file` support for `podman_compose` services so runtime env files such as `mempool.env` can be loaded by `belter` before plan execution.
+- Implemented `service bring-up <name>` as a small dependency-aware orchestrator:
+  - resolves `depends_on` in dependency order,
+  - plans the full chain in `--dry-run`,
+  - skips healthy dependencies in real execution,
+  - emits structured bring-up events.
+- Implemented `service bring-up mempool`:
+  - brings up `bitcoind` and `podman_runtime` only when needed,
+  - loads `MEMPOOL_ENV_FILE`,
+  - waits for `HTTP 200` on `/api/v1/backend-info` before reporting success.
 - Added real `config validate` implementation:
   - validates that required services (`bitcoind`, `stratum`, `mempool`) exist in config,
   - validates manager-specific required fields (`unit` for `launchd`, `compose_file` for `podman_compose`),
@@ -36,6 +49,10 @@ This section includes implemented changes that are not released yet.
   - resolves compose placeholders from env
   - queries runtime status via `podman compose ... ps -q`
   - reports `data.state`, `data.running_containers`, and `data.query_error` (when applicable)
+- Added stronger `service status mempool` semantics:
+  - `running` requires real running containers plus `HTTP 200`,
+  - `degraded` reports running containers with failed readiness,
+  - `health_url` is included in JSON output.
 - Added status JSON coverage for podman services (env-present and env-missing paths).
 - Added CLI architecture class diagrams in `docs/architecture-btc-infra-tools.md` to document module responsibilities and `service status` computation/render flow.
 
@@ -62,6 +79,7 @@ This section includes implemented changes that are not released yet.
   - `cli_service_plan_test.rs`
   - `cli_error_test.rs`
 - Updated integration test helpers to avoid machine-local absolute paths by resolving workspace root from `CARGO_MANIFEST_DIR`.
+- Updated CLI integration and unit tests to use isolated fixture directories instead of the repo `.env`, preventing host-environment contamination and parallel fixture collisions.
 
 ## [0.1.0] - 2026-03-10
 
