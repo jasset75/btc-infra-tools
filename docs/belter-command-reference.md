@@ -90,10 +90,10 @@ Semantic guidance:
 
 ## Command Tree
 ```text
-belter
+belter [--config <PATH>] [--json] [--dry-run]
   config
     init [--path <PATH>] [--force]
-    validate
+    validate [--write-missing]
     show
   info
     pool [target] [--port <PORT> | --url <URL>]
@@ -109,7 +109,7 @@ belter
     check [--all | --id <ID>] [--ui <auto|cli|tui> | --tui]
     snapshot
   run
-    action <id> [--dry-run]
+    action <id>
   tui
     dashboard
 ```
@@ -240,7 +240,7 @@ belter info pool --url http://192.0.2.10:3334/api/info
   - `launchd`: requires `unit` and runs `launchctl kickstart -k <unit>`.
   - `podman_compose`: requires `compose_file`; optional `compose_override` and `project`.
   - `podman_compose` restart is implemented as `podman compose ... down` followed by `podman compose ... up -d`.
-  - If `.env` exists in current directory, it is autoloaded before command execution.
+  - `--config` is optional; use it only to point at a non-standard config path.
   - `--dry-run`: returns simulated plan data without executing commands.
   - `--json`: returns machine-readable envelope including `plan`; dry-run preview events are omitted.
 - Operational notes:
@@ -250,16 +250,16 @@ belter info pool --url http://192.0.2.10:3334/api/info
 Example for `mempool`:
 
 ```bash
-belter --config belter.toml service restart mempool
-belter --config belter.toml --dry-run --json service start mempool
+belter service restart mempool
+belter --dry-run --json service start mempool
 ```
 
 Example for `stratum` (launchd-backed):
 
 ```bash
-belter --config belter.toml service start stratum
-belter --config belter.toml service stop stratum
-belter --config belter.toml --dry-run --json service restart stratum
+belter service start stratum
+belter service stop stratum
+belter --dry-run --json service restart stratum
 ```
 
 ### `service logs <name>`

@@ -204,7 +204,7 @@ Current behavior:
 Current practical example:
 
 ```bash
-belter --config belter.toml service bring-up mempool
+belter service bring-up mempool
 ```
 
 For `mempool`, `bring-up` currently:

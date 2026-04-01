@@ -113,23 +113,26 @@ expect = "status == 200"
 
 ## Initial Command Tree
 ```text
-belter
+belter [--config <PATH>] [--json] [--dry-run]
   config
-    init
-    validate
+    init [--path <PATH>] [--force]
+    validate [--write-missing]
     show
+  info
+    pool [target] [--port <PORT> | --url <URL>]
   service
     list
-    status [name] [--ui ...|--tui]
+    status [name] [--ui <auto|cli|tui> | --tui]
     start <name>
     stop <name>
     restart <name>
+    bring-up <name>
     logs <name> [--follow]
   health
-    check [--all|--id <check-id>] [--json] [--ui ...|--tui]
-    snapshot [--json]
+    check [--all | --id <ID>] [--ui <auto|cli|tui> | --tui]
+    snapshot
   run
-    action <id> [--dry-run]
+    action <id>
   tui
     dashboard
 ```
