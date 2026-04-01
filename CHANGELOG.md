@@ -11,11 +11,19 @@ This section includes implemented changes that are not released yet.
 ### Added
 - Implemented real `service list` with config-driven discovery from `belter.toml`.
 - Added `just install-latest-stable` to install `belter` from the newest tagged release instead of the current branch tip.
+- Added deterministic config/env discovery for `belter` across Linux/macOS:
+  - config resolution now follows `--config`, `BELTER_CONFIG`, XDG config path, then local `belter.toml`
+  - `.env` loading now follows `BELTER_ENV_FILE`, config-local `.env`, then local `./.env`
+  - `config init` now defaults to the standard XDG config location when available
 
 ### Changed
 - Updated `service list` output to report the configured services, their managers, and declared dependencies in stable sorted order for both text and `--json`.
 - Updated installation docs to distinguish installing from `main` versus installing the latest stable tagged release.
 - Hardened `just install-latest-stable` so it resolves the highest fetched `v*` tag instead of relying on `git describe` from the current checkout.
+- Updated `just install` and `just install-latest-stable` to prepare `${XDG_CONFIG_HOME}/belter` (or `~/.config/belter`) and seed config only when files do not already exist there:
+  - prefer repo-root `.env`
+  - otherwise fall back to `.env.example` copied as `.env`
+  - copy repo-root `belter.toml`
 
 ## [0.1.1] - 2026-03-31
 

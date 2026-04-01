@@ -6,7 +6,25 @@ default:
 build:
   cargo build --workspace
 
+_prepare-install-config:
+  #!/usr/bin/env zsh
+  set -eu
+  config_home="${XDG_CONFIG_HOME:-$HOME/.config}"
+  belter_config_dir="${config_home}/belter"
+  mkdir -p "${belter_config_dir}"
+  if [[ ! -f "${belter_config_dir}/.env" ]]; then
+    if [[ -f .env ]]; then
+      cp .env "${belter_config_dir}/.env"
+    else
+      cp .env.example "${belter_config_dir}/.env"
+    fi
+  fi
+  if [[ ! -f "${belter_config_dir}/belter.toml" ]]; then
+    cp belter.toml "${belter_config_dir}/belter.toml"
+  fi
+
 install:
+  just _prepare-install-config
   cargo install --path crates/infractl-cli --locked --root ~/.local --force
   ~/.local/bin/belter --version
 
@@ -20,6 +38,7 @@ install-latest-stable:
     exit 1
   fi
   git checkout "${tag}"
+  just _prepare-install-config
   cargo install --path crates/infractl-cli --locked --root ~/.local --force
   ~/.local/bin/belter --version
 

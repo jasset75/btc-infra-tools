@@ -147,8 +147,9 @@ classDiagram
 
 ### `crates/infractl-cli`
 - Entry point (`belter` binary), command parsing (`clap`) and command routing.
-- Loads `.env` from current working directory when present.
-- Reads and parses `belter.toml`.
+- Resolves config path in deterministic order: `--config`, `BELTER_CONFIG`, XDG config, then local project fallback.
+- Loads `.env` from `BELTER_ENV_FILE`, then the selected config directory, then current working directory.
+- Reads and parses the resolved `belter.toml`.
 - Composes runtime dependencies such as `SystemClock` and `ProcessEnvResolver`.
 - Builds `ServiceCommandRequest`, gets a plan, selects executor (`dry-run` or real), and emits human/JSON output.
 - Service status now supports:
@@ -176,7 +177,7 @@ classDiagram
 ## Runtime Flow (Service Actions)
 
 1. Operator runs `belter service <start|stop|restart|status> <name> [--dry-run]`.
-2. CLI loads `.env` (if present) and `belter.toml`.
+2. CLI resolves the config path, then loads environment files and parses that config.
 3. For action commands (`start|stop|restart`), `ServiceCommandRequest` validates service config and builds a `Plan`.
 4. Service `unit` placeholders are expanded via `EnvResolver`.
 5. For action commands, CLI selects executor:

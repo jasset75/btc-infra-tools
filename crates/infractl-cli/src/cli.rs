@@ -1,5 +1,4 @@
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use infractl_core::config::DEFAULT_CONFIG_FILE;
 use std::path::PathBuf;
 
 #[derive(Debug, Parser)]
@@ -11,10 +10,9 @@ pub(crate) struct Cli {
     #[arg(
         long,
         global = true,
-        default_value = DEFAULT_CONFIG_FILE,
-        help = "Path to belter config file"
+        help = "Path to belter config file; otherwise resolve from BELTER_CONFIG, XDG config, then local project file"
     )]
-    pub(crate) config: PathBuf,
+    pub(crate) config: Option<PathBuf>,
 
     #[arg(long, global = true, help = "Emit machine-readable JSON output")]
     pub(crate) json: bool,

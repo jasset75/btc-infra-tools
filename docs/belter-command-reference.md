@@ -7,7 +7,7 @@ Status:
 - Some commands still return scaffold responses.
 
 ## Global Flags
-- `--config <PATH>` (optional): config file path. Default is `belter.toml`.
+- `--config <PATH>` (optional): config file path. Resolution order when omitted: `BELTER_CONFIG`, `${XDG_CONFIG_HOME}/belter/belter.toml`, `~/.config/belter/belter.toml`, then `./belter.toml`.
 - `--json` (optional): output as JSON envelope.
 - `--dry-run` (optional): simulate command without making actual changes. This is specially useful for testing commands on machines that are not the actual infrastructure target (e.g. your local development machine).
 
@@ -121,7 +121,7 @@ belter
   - `--path <PATH>` (optional)
   - `--force` (optional)
 - Behavior:
-  - Creates a config template (default output path: `belter.toml`).
+  - Creates a config template (default output path: `${XDG_CONFIG_HOME}/belter/belter.toml`, or `~/.config/belter/belter.toml` when XDG is unset).
   - The default template includes:
     - `service.bitcoind` (`manager = "launchd"`, `unit = "${BITCOIND_LAUNCHD_UNIT}"`)
     - `service.stratum` (`manager = "launchd"`, `unit = "${STRATUM_LAUNCHD_UNIT}"`)
@@ -131,12 +131,12 @@ belter
 - Parameters:
   - `--write-missing` (optional; appends missing required service blocks before validating)
 - Behavior:
-  - Loads and parses `belter.toml`.
+  - Loads and parses the resolved config file.
   - Requires service definitions for `bitcoind`, `stratum`, and `mempool`.
   - Validates required fields by manager:
     - `launchd`: `unit` required
     - `podman_compose`: `compose_file` required (`compose_override` and `project` optional)
-  - Resolves `${ENV_VAR}` placeholders against environment (`.env` is auto-loaded at CLI startup when present).
+  - Resolves `${ENV_VAR}` placeholders against environment (`BELTER_ENV_FILE`, config-local `.env`, and local `./.env` are auto-loaded in that order when present).
   - On failure, reports actionable errors:
     - missing config sections/fields include TOML example snippets,
     - unresolved placeholders include the exact missing env var name and a suggested `export` command.

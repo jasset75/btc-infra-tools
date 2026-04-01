@@ -26,7 +26,8 @@ Monorepo for `belter`, a Rust CLI/TUI for infrastructure operations.
   - `service bring-up <name>` as a small dependency-aware orchestrator.
   - `info pool [target]` for read-only public-pool metrics from local or remote hosts.
   - `${ENV_VAR}` expansion in service `unit`.
-  - Automatic `.env` loading from current working directory.
+  - Deterministic config/env resolution: `--config`, `BELTER_CONFIG`, XDG config, then local project fallback.
+  - Automatic `.env` loading from the selected config directory, with `BELTER_ENV_FILE` override support.
   - Per-service runtime env loading for `podman_compose` services via `env_file`.
   - HTTP-aware `mempool` status and readiness checks.
   - Actionable launchd restart errors for target format and privilege requirements.
@@ -69,15 +70,29 @@ mise exec -- just clippy
 mise exec -- just clippy-fix
 ```
 
+Recommended before first install:
+
+```bash
+cp .env.example .env
+# edit .env with real operator values
+```
+
 Install `belter` binary for direct use (`belter <args>`):
 
 > *Just once, after initial mise install:*
 ```bash
-mise exec -- cargo install --path crates/infractl-cli --locked --root ~/.local
+mise exec -- just install
 echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc
 source ~/.zshrc
 belter --version
 ```
+
+`just install` also prepares the standard config directory for operators:
+- `${XDG_CONFIG_HOME}/belter` when `XDG_CONFIG_HOME` is set
+- otherwise `~/.config/belter`
+- copies repo-root `.env` to the standard config directory only if `.env` does not already exist there
+- falls back to copying `.env.example` as `.env` only when repo-root `.env` is missing
+- copies repo-root `belter.toml` only if `belter.toml` does not already exist there
 
 Tip: update from repo and rebuild installed binary:
 > *Every time you want to update:*
@@ -120,6 +135,18 @@ mise exec -- cargo run -p belter -- health snapshot --json
 ## Configuration Bootstrap
 `config init` generates a tracked-safe `belter.toml` template with environment placeholders.
 
+Runtime config resolution order:
+- `--config <PATH>`
+- `BELTER_CONFIG`
+- `${XDG_CONFIG_HOME}/belter/belter.toml`
+- `~/.config/belter/belter.toml`
+- `./belter.toml` (compatibility fallback)
+
+Environment loading order:
+- `BELTER_ENV_FILE`
+- `.env` next to the selected config file
+- `./.env`
+
 By default, HTTP checks can reference:
 - `MEMPOOL_HOST`
 - `MEMPOOL_PORT`
@@ -128,6 +155,7 @@ By default, HTTP checks can reference:
 Example:
 ```bash
 cp .env.example .env
+# edit .env with real values
 cargo run -p belter -- config init --force
 ```
 

@@ -1,11 +1,9 @@
 use anyhow::Result;
 use clap::Parser;
-use infractl_core::config::DEFAULT_CONFIG_FILE;
 use infractl_core::env::{EnvResolver, ProcessEnvResolver};
 use infractl_core::time::{Clock, SystemClock};
 use infractl_core::usecase::ServiceAction;
 use std::io::{self, Write};
-use std::path::PathBuf;
 use std::process::ExitCode;
 
 mod cli;
@@ -27,7 +25,9 @@ use crate::output::output_envelope;
 use crate::output::{emit, error_envelope};
 #[cfg(test)]
 use crate::runtime::NoopDotenvLoader;
-use crate::runtime::{DotenvLoader, ProcessDotenvLoader, RuntimeDeps};
+use crate::runtime::{
+    DotenvLoader, ProcessDotenvLoader, RuntimeDeps, default_init_config_path, resolve_config_path,
+};
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
@@ -83,14 +83,17 @@ fn run<C: Clock, E: EnvResolver, D: DotenvLoader, O: Write>(
     cli: &Cli,
     stdout: &mut O,
 ) -> Result<()> {
-    deps.dotenv_loader.load_if_present()?;
+    let cwd = std::env::current_dir()?;
+    let effective_config_path =
+        resolve_config_path(cli.config.as_deref(), &deps.env_resolver, &cwd);
+    deps.dotenv_loader.load_if_present(&effective_config_path)?;
 
     match &cli.command {
         Command::Config { command } => match command {
             ConfigCommand::Init { path, force } => {
                 let target = path
                     .clone()
-                    .unwrap_or_else(|| PathBuf::from(DEFAULT_CONFIG_FILE));
+                    .unwrap_or_else(|| default_init_config_path(&deps.env_resolver, &cwd));
                 init_config_file(&target, *force)?;
                 emit(
                     &deps.clock,
@@ -102,8 +105,11 @@ fn run<C: Clock, E: EnvResolver, D: DotenvLoader, O: Write>(
                 )
             }
             ConfigCommand::Validate { write_missing } => {
-                let message =
-                    validate_config_file(&deps.env_resolver, &cli.config, *write_missing)?;
+                let message = validate_config_file(
+                    &deps.env_resolver,
+                    &effective_config_path,
+                    *write_missing,
+                )?;
                 emit(
                     &deps.clock,
                     stdout,
@@ -137,16 +143,20 @@ fn run<C: Clock, E: EnvResolver, D: DotenvLoader, O: Write>(
             ),
         },
         Command::Service { command } => match command {
-            ServiceCommand::List => {
-                emit_list(&deps.clock, stdout, cli.json, cli.dry_run, &cli.config)
-            }
+            ServiceCommand::List => emit_list(
+                &deps.clock,
+                stdout,
+                cli.json,
+                cli.dry_run,
+                &effective_config_path,
+            ),
             ServiceCommand::Status { name, ui } => match name {
                 Some(service_name) => emit_status(StatusEmitCtx {
                     clock: &deps.clock,
                     stdout,
                     json: cli.json,
                     dry_run: cli.dry_run,
-                    config_path: &cli.config,
+                    config_path: &effective_config_path,
                     env_resolver: &deps.env_resolver,
                     service_name,
                     ui_mode: ui.effective(),
@@ -168,7 +178,7 @@ fn run<C: Clock, E: EnvResolver, D: DotenvLoader, O: Write>(
                 "service.start",
                 execute_service_command_from_config(
                     &deps.env_resolver,
-                    &cli.config,
+                    &effective_config_path,
                     name,
                     ServiceAction::Start,
                     cli.dry_run,
@@ -182,7 +192,7 @@ fn run<C: Clock, E: EnvResolver, D: DotenvLoader, O: Write>(
                 "service.stop",
                 execute_service_command_from_config(
                     &deps.env_resolver,
-                    &cli.config,
+                    &effective_config_path,
                     name,
                     ServiceAction::Stop,
                     cli.dry_run,
@@ -196,7 +206,7 @@ fn run<C: Clock, E: EnvResolver, D: DotenvLoader, O: Write>(
                 "service.restart",
                 execute_service_command_from_config(
                     &deps.env_resolver,
-                    &cli.config,
+                    &effective_config_path,
                     name,
                     ServiceAction::Restart,
                     cli.dry_run,
@@ -210,7 +220,7 @@ fn run<C: Clock, E: EnvResolver, D: DotenvLoader, O: Write>(
                 "service.bring-up",
                 execute_service_bring_up_from_config(
                     &deps.env_resolver,
-                    &cli.config,
+                    &effective_config_path,
                     name,
                     cli.dry_run,
                 ),
@@ -273,6 +283,7 @@ mod tests {
     use serde_json::Value;
     use std::collections::HashMap;
     use std::fs;
+    use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
