@@ -20,10 +20,10 @@ This section includes implemented changes that are not released yet.
 - Updated `service list` output to report the configured services, their managers, and declared dependencies in stable sorted order for both text and `--json`.
 - Updated installation docs to distinguish installing from `main` versus installing the latest stable tagged release.
 - Hardened `just install-latest-stable` so it resolves the highest fetched `v*` tag instead of relying on `git describe` from the current checkout.
-- Updated `just install` and `just install-latest-stable` to prepare `${XDG_CONFIG_HOME}/belter` (or `~/.config/belter`) and seed config only when files do not already exist there:
-  - prefer repo-root `.env`
-  - otherwise fall back to `.env.example` copied as `.env`
-  - copy repo-root `belter.toml`
+- Updated `just install` and `just install-latest-stable` to prepare `${XDG_CONFIG_HOME}/belter` (or `~/.config/belter`) and refresh config on each install:
+  - seed repo-root `.env` from `.env.example` when missing
+  - treat repo-root `.env` as the source of truth for installed config
+  - overwrite repo-root `.env` and `belter.toml` into the standard config directory on each install
 
 ## [0.1.1] - 2026-03-31
 

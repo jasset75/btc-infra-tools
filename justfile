@@ -12,16 +12,11 @@ _prepare-install-config:
   config_home="${XDG_CONFIG_HOME:-$HOME/.config}"
   belter_config_dir="${config_home}/belter"
   mkdir -p "${belter_config_dir}"
-  if [[ ! -f "${belter_config_dir}/.env" ]]; then
-    if [[ -f .env ]]; then
-      cp .env "${belter_config_dir}/.env"
-    else
-      cp .env.example "${belter_config_dir}/.env"
-    fi
+  if [[ ! -f .env ]]; then
+    cp .env.example .env
   fi
-  if [[ ! -f "${belter_config_dir}/belter.toml" ]]; then
-    cp belter.toml "${belter_config_dir}/belter.toml"
-  fi
+  cp .env "${belter_config_dir}/.env"
+  cp belter.toml "${belter_config_dir}/belter.toml"
 
 install:
   just _prepare-install-config

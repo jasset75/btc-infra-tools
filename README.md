@@ -90,9 +90,10 @@ belter --version
 `just install` also prepares the standard config directory for operators:
 - `${XDG_CONFIG_HOME}/belter` when `XDG_CONFIG_HOME` is set
 - otherwise `~/.config/belter`
-- copies repo-root `.env` to the standard config directory only if `.env` does not already exist there
-- falls back to copying `.env.example` as `.env` only when repo-root `.env` is missing
-- copies repo-root `belter.toml` only if `belter.toml` does not already exist there
+- creates repo-root `.env` from `.env.example` when `.env` is missing
+- treats repo-root `.env` as the single source of truth
+- overwrites `.env` in the standard config directory from repo-root `.env` on each install
+- overwrites `belter.toml` from the repo root on each install
 
 Tip: update from repo and rebuild installed binary:
 > *Every time you want to update:*
