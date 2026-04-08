@@ -155,6 +155,23 @@ struct StatusComputation {
     data: ServiceStatusData,
 }
 
+struct PodmanComposeStatusSnapshot {
+    compose_file: String,
+    compose_override: Option<String>,
+    project: Option<String>,
+    state: &'static str,
+    running_containers: Vec<String>,
+    query_error: Option<String>,
+    health_url: Option<String>,
+}
+
+struct DependentComposeIssue {
+    service: String,
+    state: &'static str,
+    running_containers: Vec<String>,
+    query_error: Option<String>,
+}
+
 pub(crate) fn emit_list<W: Write>(
     clock: &dyn Clock,
     stdout: &mut W,
@@ -275,7 +292,7 @@ pub(crate) fn emit_status<W: Write>(ctx: StatusEmitCtx<'_, W>) -> Result<()> {
         return Ok(());
     }
 
-    let computed = compute_status(&ctx, service)?;
+    let computed = compute_status(&ctx, &config, service)?;
     emit_status_out(
         ctx.clock,
         ctx.stdout,
@@ -357,7 +374,7 @@ pub(crate) fn emit_status_all<W: Write>(
             service_name,
             ui_mode,
         };
-        computed.push(compute_status(&ctx, service)?);
+        computed.push(compute_status(&ctx, &config, service)?);
     }
 
     let unknown = computed
@@ -392,6 +409,7 @@ pub(crate) fn emit_status_all<W: Write>(
 
 fn compute_status(
     ctx: &StatusEmitCtx<'_, impl Write>,
+    config: &BelterConfig,
     service: &infractl_core::config::ServiceConfig,
 ) -> Result<StatusComputation> {
     if service.manager == LAUNCHD_MANAGER {
@@ -421,118 +439,32 @@ fn compute_status(
     }
 
     if service.manager == PODMAN_COMPOSE_MANAGER {
-        let service_name = ctx.service_name.to_string();
-        let compose_file_tmpl = service.compose_file.as_deref().ok_or_else(|| {
-            anyhow::anyhow!("service `{}` is missing `compose_file`", ctx.service_name)
-        })?;
-        let compose_file = match expand_placeholders(compose_file_tmpl, ctx.env_resolver) {
-            Ok(value) => value,
-            Err(err) => {
-                return Ok(unknown_status(
-                    ctx,
-                    ServiceStatusData::podman(
-                        &service_name,
-                        Some(compose_file_tmpl.to_string()),
-                        None,
-                        None,
-                        "unknown",
-                        Vec::new(),
-                        Some(err.to_string()),
-                    ),
-                ));
-            }
-        };
-        let compose_override = match service
-            .compose_override
-            .as_deref()
-            .map(|value| expand_placeholders(value, ctx.env_resolver))
-            .transpose()
-        {
-            Ok(value) => value,
-            Err(err) => {
-                return Ok(unknown_status(
-                    ctx,
-                    ServiceStatusData::podman(
-                        &service_name,
-                        Some(compose_file.clone()),
-                        None,
-                        None,
-                        "unknown",
-                        Vec::new(),
-                        Some(err.to_string()),
-                    ),
-                ));
-            }
-        };
-        let project = match service
-            .project
-            .as_deref()
-            .map(|value| expand_placeholders(value, ctx.env_resolver))
-            .transpose()
-        {
-            Ok(value) => value,
-            Err(err) => {
-                return Ok(unknown_status(
-                    ctx,
-                    ServiceStatusData::podman(
-                        &service_name,
-                        Some(compose_file.clone()),
-                        compose_override.clone(),
-                        None,
-                        "unknown",
-                        Vec::new(),
-                        Some(err.to_string()),
-                    ),
-                ));
-            }
-        };
-
-        let (state, running_containers, query_error, health_url) =
-            match infractl_adapters::PodmanComposeAdapter.running_container_ids(
-                &compose_file,
-                compose_override.as_deref(),
-                project.as_deref(),
-            ) {
-                Ok(ids) => {
-                    if ids.is_empty() {
-                        ("stopped", ids, None, None)
-                    } else if ctx.service_name == "mempool" {
-                        let url = mempool_health_url(ctx.env_resolver);
-                        match probe_http_200(&url) {
-                            Ok(()) => ("running", ids, None, Some(url)),
-                            Err(err) => ("degraded", ids, Some(err.to_string()), Some(url)),
-                        }
-                    } else {
-                        ("running", ids, None, None)
-                    }
-                }
-                Err(err) => ("unknown", Vec::new(), Some(err.to_string()), None),
-            };
+        let snapshot = compute_podman_compose_status_snapshot(ctx.service_name, service, ctx.env_resolver)?;
 
         let message = format!(
-            "status target={} ui={:?} state={state}",
-            ctx.service_name, ctx.ui_mode
+            "status target={} ui={:?} state={}",
+            ctx.service_name, ctx.ui_mode, snapshot.state
         );
         let status_data = if ctx.service_name == "mempool" {
             ServiceStatusData::podman(
                 ctx.service_name,
-                Some(compose_file),
-                compose_override,
-                project,
-                state,
-                running_containers,
+                Some(snapshot.compose_file),
+                snapshot.compose_override,
+                snapshot.project,
+                snapshot.state,
+                snapshot.running_containers,
                 None,
             )
-            .with_health(health_url, query_error)
+            .with_health(snapshot.health_url, snapshot.query_error)
         } else {
             ServiceStatusData::podman(
                 ctx.service_name,
-                Some(compose_file),
-                compose_override,
-                project,
-                state,
-                running_containers,
-                query_error,
+                Some(snapshot.compose_file),
+                snapshot.compose_override,
+                snapshot.project,
+                snapshot.state,
+                snapshot.running_containers,
+                snapshot.query_error,
             )
         };
         return Ok(StatusComputation {
@@ -561,12 +493,14 @@ fn compute_status(
             }
         };
 
-        let (state, query_error) =
-            match infractl_adapters::PodmanMachineAdapter.is_running(&machine) {
-                Ok(true) => ("running", None),
-                Ok(false) => ("stopped", None),
-                Err(err) => ("unknown", Some(err.to_string())),
-            };
+        let (state, query_error) = match infractl_adapters::PodmanMachineAdapter.is_running(&machine)
+        {
+            Ok(true) => derive_podman_runtime_state(
+                dependent_compose_issues(config, ctx.service_name, ctx.env_resolver),
+            ),
+            Ok(false) => ("stopped", None),
+            Err(err) => ("unknown", Some(err.to_string())),
+        };
 
         let message = format!(
             "status target={} ui={:?} state={state}",
@@ -600,6 +534,160 @@ fn compute_status(
             query_error: None,
         },
     })
+}
+
+fn compute_podman_compose_status_snapshot(
+    service_name: &str,
+    service: &infractl_core::config::ServiceConfig,
+    env_resolver: &dyn EnvResolver,
+) -> Result<PodmanComposeStatusSnapshot> {
+    let compose_file_tmpl = service
+        .compose_file
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("service `{service_name}` is missing `compose_file`"))?;
+    let compose_file = match expand_placeholders(compose_file_tmpl, env_resolver) {
+        Ok(value) => value,
+        Err(err) => {
+            return Ok(PodmanComposeStatusSnapshot {
+                compose_file: compose_file_tmpl.to_string(),
+                compose_override: None,
+                project: None,
+                state: "unknown",
+                running_containers: Vec::new(),
+                query_error: Some(err.to_string()),
+                health_url: None,
+            });
+        }
+    };
+    let compose_override = match service
+        .compose_override
+        .as_deref()
+        .map(|value| expand_placeholders(value, env_resolver))
+        .transpose()
+    {
+        Ok(value) => value,
+        Err(err) => {
+            return Ok(PodmanComposeStatusSnapshot {
+                compose_file,
+                compose_override: None,
+                project: None,
+                state: "unknown",
+                running_containers: Vec::new(),
+                query_error: Some(err.to_string()),
+                health_url: None,
+            });
+        }
+    };
+    let project = match service
+        .project
+        .as_deref()
+        .map(|value| expand_placeholders(value, env_resolver))
+        .transpose()
+    {
+        Ok(value) => value,
+        Err(err) => {
+            return Ok(PodmanComposeStatusSnapshot {
+                compose_file,
+                compose_override,
+                project: None,
+                state: "unknown",
+                running_containers: Vec::new(),
+                query_error: Some(err.to_string()),
+                health_url: None,
+            });
+        }
+    };
+
+    let (state, running_containers, query_error, health_url) =
+        match infractl_adapters::PodmanComposeAdapter.running_container_ids(
+            &compose_file,
+            compose_override.as_deref(),
+            project.as_deref(),
+        ) {
+            Ok(ids) => {
+                if ids.is_empty() {
+                    ("stopped", ids, None, None)
+                } else if service_name == "mempool" {
+                    let url = mempool_health_url(env_resolver);
+                    match probe_http_200(&url) {
+                        Ok(()) => ("running", ids, None, Some(url)),
+                        Err(err) => ("degraded", ids, Some(err.to_string()), Some(url)),
+                    }
+                } else {
+                    ("running", ids, None, None)
+                }
+            }
+            Err(err) => ("unknown", Vec::new(), Some(err.to_string()), None),
+        };
+
+    Ok(PodmanComposeStatusSnapshot {
+        compose_file,
+        compose_override,
+        project,
+        state,
+        running_containers,
+        query_error,
+        health_url,
+    })
+}
+
+fn dependent_compose_issues(
+    config: &BelterConfig,
+    runtime_service_name: &str,
+    env_resolver: &dyn EnvResolver,
+) -> Vec<DependentComposeIssue> {
+    config
+        .service
+        .as_ref()
+        .into_iter()
+        .flat_map(|services| services.iter())
+        .filter(|(_, service)| service.manager == PODMAN_COMPOSE_MANAGER)
+        .filter(|(_, service)| {
+            service
+                .depends_on
+                .as_deref()
+                .unwrap_or(&[])
+                .iter()
+                .any(|dependency| dependency == runtime_service_name)
+        })
+        .filter_map(|(name, service)| {
+            let snapshot = compute_podman_compose_status_snapshot(name, service, env_resolver).ok()?;
+            if snapshot.state == "degraded" && !snapshot.running_containers.is_empty() {
+                Some(DependentComposeIssue {
+                    service: name.clone(),
+                    state: snapshot.state,
+                    running_containers: snapshot.running_containers,
+                    query_error: snapshot.query_error,
+                })
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+fn derive_podman_runtime_state(
+    dependent_issues: Vec<DependentComposeIssue>,
+) -> (&'static str, Option<String>) {
+    if dependent_issues.is_empty() {
+        return ("running", None);
+    }
+
+    let issue = &dependent_issues[0];
+    let detail = issue
+        .query_error
+        .as_deref()
+        .unwrap_or("dependent compose service reported degraded state");
+    (
+        "degraded",
+        Some(format!(
+            "dependent service `{}` is {} with {} running container(s); podman port forwarding may be unhealthy: {}",
+            issue.service,
+            issue.state,
+            issue.running_containers.len(),
+            detail
+        )),
+    )
 }
 
 fn mempool_health_url(env_resolver: &dyn EnvResolver) -> String {
@@ -1302,7 +1390,8 @@ fn action_label(action: ServiceAction) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        RuntimeState, bring_up_action, bring_up_retry_action_after_failed_readiness,
+        DependentComposeIssue, RuntimeState, bring_up_action,
+        bring_up_retry_action_after_failed_readiness, derive_podman_runtime_state,
         validate_http_status_line,
     };
     use infractl_core::usecase::ServiceAction;
@@ -1343,6 +1432,22 @@ mod tests {
             RuntimeState::Unknown
         )
         .is_none());
+    }
+
+    #[test]
+    fn derive_podman_runtime_state_degrades_when_dependent_compose_service_is_degraded() {
+        let (state, query_error) = derive_podman_runtime_state(vec![DependentComposeIssue {
+            service: "mempool".to_string(),
+            state: "degraded",
+            running_containers: vec!["abc".to_string(), "def".to_string()],
+            query_error: Some("unexpected HTTP status from 127.0.0.1:8080: HTTP/1.1 502 Bad Gateway".to_string()),
+        }]);
+
+        assert_eq!(state, "degraded");
+        let query_error = query_error.expect("query_error should be present");
+        assert!(query_error.contains("dependent service `mempool`"));
+        assert!(query_error.contains("podman port forwarding may be unhealthy"));
+        assert!(query_error.contains("HTTP/1.1 502 Bad Gateway"));
     }
 
     #[test]
