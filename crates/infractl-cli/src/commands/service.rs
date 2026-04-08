@@ -11,7 +11,8 @@ use serde::Serialize;
 use serde_json::json;
 use std::collections::HashSet;
 use std::fs;
-use std::io::Read;
+use std::io::BufRead;
+use std::io::BufReader;
 use std::io::Write;
 use std::net::TcpStream;
 use std::path::PathBuf;
@@ -631,21 +632,21 @@ fn probe_http_200(url: &str) -> Result<()> {
         .write_all(request.as_bytes())
         .context("failed to write HTTP request")?;
 
-    let mut response = String::new();
-    stream
-        .read_to_string(&mut response)
+    let mut reader = BufReader::new(stream);
+    let mut status_line = String::new();
+    reader
+        .read_line(&mut status_line)
         .context("failed to read HTTP response")?;
+    validate_http_status_line(&endpoint.authority(), &status_line)
+}
 
-    let status_line = response.lines().next().unwrap_or_default();
+fn validate_http_status_line(authority: &str, status_line: &str) -> Result<()> {
+    let status_line = status_line.trim_end_matches(['\r', '\n']);
     if status_line.contains(" 200 ") {
         return Ok(());
     }
 
-    bail!(
-        "unexpected HTTP status from {}: {}",
-        endpoint.authority(),
-        status_line
-    )
+    bail!("unexpected HTTP status from {authority}: {status_line}")
 }
 
 struct HttpEndpoint {
@@ -826,6 +827,15 @@ pub(crate) fn execute_service_bring_up_from_config(
         maybe_load_service_env_file(env_resolver, &config, name)?;
     }
 
+    let initial_runtime_state = if dry_run {
+        None
+    } else {
+        let service = config
+            .service_by_name(service_name)
+            .ok_or_else(|| anyhow::anyhow!("service `{service_name}` not found in config"))?;
+        Some(compute_runtime_state(service_name, service, env_resolver)?)
+    };
+
     let bring_up = build_bring_up_plan(&config, env_resolver, &ordered_services, dry_run)?;
 
     use infractl_core::plan::Executor;
@@ -845,7 +855,8 @@ pub(crate) fn execute_service_bring_up_from_config(
     }
 
     let mut executor = infractl_adapters::executor::RealExecutor::new();
-    let execution_report = executor.execute(&bring_up.plan)?;
+    let mut plan = bring_up.plan;
+    let mut execution_report = executor.execute(&plan)?;
     let mut events = bring_up.events;
 
     if service_name == "mempool" {
@@ -855,7 +866,51 @@ pub(crate) fn execute_service_bring_up_from_config(
             "waiting for mempool HTTP readiness",
             json!({ "health_url": mempool_health_url(env_resolver) }),
         ));
-        wait_for_mempool_readiness(env_resolver)?;
+        match wait_for_mempool_readiness(env_resolver) {
+            Ok(()) => {}
+            Err(err) => {
+                if let Some(action) = bring_up_retry_action_after_failed_readiness(
+                    service_name,
+                    initial_runtime_state.unwrap_or(RuntimeState::Unknown),
+                ) {
+                    events.push(output_event(
+                        SeverityLevel::Warning,
+                        "bring_up.readiness_retry",
+                        &format!(
+                            "mempool readiness failed after {}; retrying with {}",
+                            action_label(ServiceAction::Start),
+                            action_label(action)
+                        ),
+                        json!({
+                            "service": service_name,
+                            "initial_state": runtime_state_label(
+                                initial_runtime_state.unwrap_or(RuntimeState::Unknown)
+                            ),
+                            "health_url": mempool_health_url(env_resolver),
+                            "previous_error": err.to_string(),
+                            "retry_action": action_label(action),
+                        }),
+                    ));
+                    let retry_plan = ServiceCommandRequest {
+                        config: &config,
+                        service_name,
+                        action,
+                    }
+                    .plan(env_resolver)?;
+                    execution_report.extend(executor.execute(&retry_plan)?);
+                    plan.operations.extend(retry_plan.operations);
+                    events.push(output_event(
+                        SeverityLevel::Info,
+                        "bring_up.waiting_readiness",
+                        "waiting for mempool HTTP readiness",
+                        json!({ "health_url": mempool_health_url(env_resolver) }),
+                    ));
+                    wait_for_mempool_readiness(env_resolver)?;
+                } else {
+                    return Err(err);
+                }
+            }
+        }
         events.push(output_event(
             SeverityLevel::Info,
             "bring_up.ready",
@@ -865,7 +920,7 @@ pub(crate) fn execute_service_bring_up_from_config(
     }
 
     Ok(PlanExecutionResult {
-        plan: bring_up.plan,
+        plan,
         message: format!(
             "bring-up completed for service `{service_name}` (dependencies: {})",
             ordered_services.join(", ")
@@ -964,17 +1019,21 @@ fn build_bring_up_plan(
                 .ok_or_else(|| anyhow::anyhow!("service `{service_name}` not found in config"))?;
             let state = compute_runtime_state(service_name, service, env_resolver)?;
 
-            if should_start_for_bring_up(service_name, state) {
+            if let Some(action) = bring_up_action(service_name, state) {
                 events.push(output_event(
                     SeverityLevel::Info,
-                    "bring_up.starting",
-                    &format!("starting `{service_name}`"),
-                    json!({ "service": service_name, "state": runtime_state_label(state) }),
+                    "bring_up.applying",
+                    &format!("{} `{service_name}`", action_label(action)),
+                    json!({
+                        "service": service_name,
+                        "state": runtime_state_label(state),
+                        "action": action_label(action),
+                    }),
                 ));
                 let req = ServiceCommandRequest {
                     config,
                     service_name,
-                    action: ServiceAction::Start,
+                    action,
                 };
                 let mut plan = req.plan(env_resolver)?;
                 operations.append(&mut plan.operations);
@@ -1075,11 +1134,21 @@ fn compute_runtime_state(
     }
 }
 
-fn should_start_for_bring_up(service_name: &str, state: RuntimeState) -> bool {
+fn bring_up_action(service_name: &str, state: RuntimeState) -> Option<ServiceAction> {
     match state {
-        RuntimeState::Stopped | RuntimeState::Unknown => true,
-        RuntimeState::Degraded if service_name == "mempool" => true,
-        RuntimeState::Running | RuntimeState::Degraded => false,
+        RuntimeState::Stopped | RuntimeState::Unknown => Some(ServiceAction::Start),
+        RuntimeState::Degraded if service_name == "mempool" => Some(ServiceAction::Restart),
+        RuntimeState::Running | RuntimeState::Degraded => None,
+    }
+}
+
+fn bring_up_retry_action_after_failed_readiness(
+    service_name: &str,
+    initial_state: RuntimeState,
+) -> Option<ServiceAction> {
+    match (service_name, initial_state) {
+        ("mempool", RuntimeState::Unknown) => Some(ServiceAction::Restart),
+        _ => None,
     }
 }
 
@@ -1227,5 +1296,76 @@ fn action_label(action: ServiceAction) -> &'static str {
         ServiceAction::Start => "start",
         ServiceAction::Stop => "stop",
         ServiceAction::Restart => "restart",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        RuntimeState, bring_up_action, bring_up_retry_action_after_failed_readiness,
+        validate_http_status_line,
+    };
+    use infractl_core::usecase::ServiceAction;
+
+    #[test]
+    fn bring_up_action_restarts_degraded_mempool() {
+        assert!(matches!(
+            bring_up_action("mempool", RuntimeState::Degraded),
+            Some(ServiceAction::Restart)
+        ));
+    }
+
+    #[test]
+    fn bring_up_action_starts_stopped_services() {
+        assert!(matches!(
+            bring_up_action("mempool", RuntimeState::Stopped),
+            Some(ServiceAction::Start)
+        ));
+        assert!(matches!(
+            bring_up_action("bitcoind", RuntimeState::Unknown),
+            Some(ServiceAction::Start)
+        ));
+    }
+
+    #[test]
+    fn bring_up_retry_action_restarts_unknown_mempool_after_failed_readiness() {
+        assert!(matches!(
+            bring_up_retry_action_after_failed_readiness("mempool", RuntimeState::Unknown),
+            Some(ServiceAction::Restart)
+        ));
+        assert!(bring_up_retry_action_after_failed_readiness(
+            "mempool",
+            RuntimeState::Stopped
+        )
+        .is_none());
+        assert!(bring_up_retry_action_after_failed_readiness(
+            "bitcoind",
+            RuntimeState::Unknown
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn validate_http_status_line_reports_non_200_status() {
+        let err = validate_http_status_line(
+            "127.0.0.1:8080",
+            "HTTP/1.1 502 Bad Gateway\r\n",
+        )
+        .expect_err("validation should fail for non-200 response");
+        assert!(
+            err.to_string()
+                .contains("unexpected HTTP status from 127.0.0.1"),
+            "unexpected error: {err:#}"
+        );
+        assert!(
+            err.to_string().contains("HTTP/1.1 502 Bad Gateway"),
+            "unexpected error: {err:#}"
+        );
+    }
+
+    #[test]
+    fn validate_http_status_line_accepts_200_status() {
+        validate_http_status_line("127.0.0.1:8080", "HTTP/1.1 200 OK\r\n")
+            .expect("validation should succeed for 200 response");
     }
 }
