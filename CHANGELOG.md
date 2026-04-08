@@ -24,6 +24,11 @@ This section includes implemented changes that are not released yet.
   - seed repo-root `.env` from `.env.example` when missing
   - treat repo-root `.env` as the source of truth for installed config
   - overwrite repo-root `.env` and `belter.toml` into the standard config directory on each install
+- Hardened Podman-backed service recovery and diagnostics:
+  - `service status mempool` now reports the real host HTTP status-line failure instead of a generic read error for keep-alive responses,
+  - `service bring-up mempool` now uses `restart` for initial `degraded` state and retries `unknown` readiness failures with `restart`,
+  - `service status podman_runtime` can now degrade when a dependent compose service remains up but unhealthy,
+  - `service bring-up mempool` can now recognize the known `podman_runtime` forwarding failure pattern and recover by restarting `podman_runtime` before reapplying `mempool`.
 
 ## [0.1.1] - 2026-03-31
 

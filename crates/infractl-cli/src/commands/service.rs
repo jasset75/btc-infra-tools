@@ -4,7 +4,7 @@ use anyhow::{Context, Result, bail};
 use infractl_core::config::BelterConfig;
 use infractl_core::env::{EnvResolver, expand_placeholders};
 use infractl_core::output::{OutputEvent, SeverityLevel};
-use infractl_core::plan::{ExecutionDetails, ExecutionReport, Plan};
+use infractl_core::plan::{ExecutionDetails, ExecutionReport, Executor, Plan};
 use infractl_core::time::{Clock, SystemClock};
 use infractl_core::usecase::{ServiceAction, ServiceCommandRequest};
 use serde::Serialize;
@@ -954,51 +954,17 @@ pub(crate) fn execute_service_bring_up_from_config(
             "waiting for mempool HTTP readiness",
             json!({ "health_url": mempool_health_url(env_resolver) }),
         ));
-        match wait_for_mempool_readiness(env_resolver) {
-            Ok(()) => {}
-            Err(err) => {
-                if let Some(action) = bring_up_retry_action_after_failed_readiness(
-                    service_name,
-                    initial_runtime_state.unwrap_or(RuntimeState::Unknown),
-                ) {
-                    events.push(output_event(
-                        SeverityLevel::Warning,
-                        "bring_up.readiness_retry",
-                        &format!(
-                            "mempool readiness failed after {}; retrying with {}",
-                            action_label(ServiceAction::Start),
-                            action_label(action)
-                        ),
-                        json!({
-                            "service": service_name,
-                            "initial_state": runtime_state_label(
-                                initial_runtime_state.unwrap_or(RuntimeState::Unknown)
-                            ),
-                            "health_url": mempool_health_url(env_resolver),
-                            "previous_error": err.to_string(),
-                            "retry_action": action_label(action),
-                        }),
-                    ));
-                    let retry_plan = ServiceCommandRequest {
-                        config: &config,
-                        service_name,
-                        action,
-                    }
-                    .plan(env_resolver)?;
-                    execution_report.extend(executor.execute(&retry_plan)?);
-                    plan.operations.extend(retry_plan.operations);
-                    events.push(output_event(
-                        SeverityLevel::Info,
-                        "bring_up.waiting_readiness",
-                        "waiting for mempool HTTP readiness",
-                        json!({ "health_url": mempool_health_url(env_resolver) }),
-                    ));
-                    wait_for_mempool_readiness(env_resolver)?;
-                } else {
-                    return Err(err);
-                }
-            }
-        }
+        let initial_runtime_state = initial_runtime_state.unwrap_or(RuntimeState::Unknown);
+        let mut recovery = MempoolBringUpRecoveryCtx {
+            config: &config,
+            env_resolver,
+            executor: &mut executor,
+            accumulated_plan: &mut plan,
+            execution_report: &mut execution_report,
+            events: &mut events,
+            service_name,
+        };
+        recover_mempool_readiness_if_needed(&mut recovery, initial_runtime_state)?;
         events.push(output_event(
             SeverityLevel::Info,
             "bring_up.ready",
@@ -1016,6 +982,147 @@ pub(crate) fn execute_service_bring_up_from_config(
         execution_report,
         events,
     })
+}
+
+fn recover_mempool_readiness_if_needed(
+    recovery: &mut MempoolBringUpRecoveryCtx<'_>,
+    initial_runtime_state: RuntimeState,
+) -> Result<()> {
+    match wait_for_mempool_readiness(recovery.env_resolver) {
+        Ok(()) => Ok(()),
+        Err(err) => {
+            let maybe_err = retry_mempool_service_after_failed_readiness(
+                recovery,
+                initial_runtime_state,
+                err,
+            )?;
+            let Some(err) = maybe_err else {
+                return Ok(());
+            };
+            retry_mempool_runtime_after_failed_readiness(recovery, err)
+        }
+    }
+}
+
+fn retry_mempool_service_after_failed_readiness(
+    recovery: &mut MempoolBringUpRecoveryCtx<'_>,
+    initial_runtime_state: RuntimeState,
+    previous_error: anyhow::Error,
+) -> Result<Option<anyhow::Error>> {
+    let Some(action) =
+        bring_up_retry_action_after_failed_readiness(recovery.service_name, initial_runtime_state)
+    else {
+        return Ok(Some(previous_error));
+    };
+
+    recovery.events.push(output_event(
+        SeverityLevel::Warning,
+        "bring_up.readiness_retry",
+        &format!(
+            "mempool readiness failed after {}; retrying with {}",
+            action_label(ServiceAction::Start),
+            action_label(action)
+        ),
+        json!({
+            "service": recovery.service_name,
+            "initial_state": runtime_state_label(initial_runtime_state),
+            "health_url": mempool_health_url(recovery.env_resolver),
+            "previous_error": previous_error.to_string(),
+            "retry_action": action_label(action),
+        }),
+    ));
+    execute_service_action(recovery, recovery.service_name, action)?;
+    recovery.events.push(output_event(
+        SeverityLevel::Info,
+        "bring_up.waiting_readiness",
+        "waiting for mempool HTTP readiness",
+        json!({ "health_url": mempool_health_url(recovery.env_resolver) }),
+    ));
+
+    match wait_for_mempool_readiness(recovery.env_resolver) {
+        Ok(()) => Ok(None),
+        Err(err) => Ok(Some(err)),
+    }
+}
+
+fn retry_mempool_runtime_after_failed_readiness(
+    recovery: &mut MempoolBringUpRecoveryCtx<'_>,
+    previous_error: anyhow::Error,
+) -> Result<()> {
+    let Some(runtime_service_name) =
+        bring_up_runtime_recovery_service(recovery.config, recovery.service_name)
+    else {
+        return Err(previous_error);
+    };
+
+    let runtime_service = recovery
+        .config
+        .service_by_name(&runtime_service_name)
+        .ok_or_else(|| anyhow::anyhow!("service `{runtime_service_name}` not found in config"))?;
+    let runtime_state =
+        compute_runtime_state(&runtime_service_name, runtime_service, recovery.env_resolver)?;
+    let Some(runtime_action) =
+        bring_up_runtime_retry_action_after_failed_readiness(runtime_state)
+    else {
+        return Err(previous_error);
+    };
+
+    recovery.events.push(output_event(
+        SeverityLevel::Warning,
+        "bring_up.runtime_recovery",
+        &format!(
+            "mempool readiness still failing; retrying by {} `{}`",
+            action_label(runtime_action),
+            runtime_service_name
+        ),
+        json!({
+            "service": recovery.service_name,
+            "runtime_service": runtime_service_name,
+            "runtime_state": runtime_state_label(runtime_state),
+            "health_url": mempool_health_url(recovery.env_resolver),
+            "previous_error": previous_error.to_string(),
+            "retry_action": action_label(runtime_action),
+        }),
+    ));
+    execute_service_action(recovery, &runtime_service_name, runtime_action)?;
+    recovery.events.push(output_event(
+        SeverityLevel::Info,
+        "bring_up.service_reapply",
+        "reapplying mempool after runtime recovery",
+        json!({
+            "service": recovery.service_name,
+            "runtime_service": runtime_service_name,
+        }),
+    ));
+    execute_service_action(recovery, recovery.service_name, ServiceAction::Start)?;
+    recovery.events.push(output_event(
+        SeverityLevel::Info,
+        "bring_up.waiting_readiness",
+        "waiting for mempool HTTP readiness",
+        json!({ "health_url": mempool_health_url(recovery.env_resolver) }),
+    ));
+    wait_for_mempool_readiness(recovery.env_resolver)
+}
+
+fn execute_service_action(
+    recovery: &mut MempoolBringUpRecoveryCtx<'_>,
+    service_name: &str,
+    action: ServiceAction,
+) -> Result<()> {
+    let action_plan = ServiceCommandRequest {
+        config: recovery.config,
+        service_name,
+        action,
+    }
+    .plan(recovery.env_resolver)?;
+    recovery
+        .execution_report
+        .extend(recovery.executor.execute(&action_plan)?);
+    recovery
+        .accumulated_plan
+        .operations
+        .extend(action_plan.operations);
+    Ok(())
 }
 
 fn maybe_load_service_env_file(
@@ -1147,6 +1254,16 @@ struct BringUpPlan {
     events: Vec<OutputEvent>,
 }
 
+struct MempoolBringUpRecoveryCtx<'a> {
+    config: &'a BelterConfig,
+    env_resolver: &'a dyn EnvResolver,
+    executor: &'a mut infractl_adapters::executor::RealExecutor,
+    accumulated_plan: &'a mut Plan,
+    execution_report: &'a mut Vec<ExecutionReport>,
+    events: &'a mut Vec<OutputEvent>,
+    service_name: &'a str,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum RuntimeState {
     Running,
@@ -1237,6 +1354,30 @@ fn bring_up_retry_action_after_failed_readiness(
     match (service_name, initial_state) {
         ("mempool", RuntimeState::Unknown) => Some(ServiceAction::Restart),
         _ => None,
+    }
+}
+
+fn bring_up_runtime_recovery_service(config: &BelterConfig, service_name: &str) -> Option<String> {
+    config
+        .service_by_name(service_name)?
+        .depends_on
+        .as_deref()?
+        .iter()
+        .find(|dependency| {
+            config
+                .service_by_name(dependency)
+                .map(|service| service.manager == PODMAN_MACHINE_MANAGER)
+                .unwrap_or(false)
+        })
+        .cloned()
+}
+
+fn bring_up_runtime_retry_action_after_failed_readiness(
+    runtime_state: RuntimeState,
+) -> Option<ServiceAction> {
+    match runtime_state {
+        RuntimeState::Degraded => Some(ServiceAction::Restart),
+        RuntimeState::Running | RuntimeState::Stopped | RuntimeState::Unknown => None,
     }
 }
 
@@ -1391,10 +1532,46 @@ fn action_label(action: ServiceAction) -> &'static str {
 mod tests {
     use super::{
         DependentComposeIssue, RuntimeState, bring_up_action,
-        bring_up_retry_action_after_failed_readiness, derive_podman_runtime_state,
+        bring_up_retry_action_after_failed_readiness, bring_up_runtime_recovery_service,
+        bring_up_runtime_retry_action_after_failed_readiness, derive_podman_runtime_state,
         validate_http_status_line,
     };
+    use infractl_core::config::{BelterConfig, ServiceConfig};
     use infractl_core::usecase::ServiceAction;
+    use std::collections::HashMap;
+
+    fn mempool_with_runtime_config() -> BelterConfig {
+        let mut services = HashMap::new();
+        services.insert(
+            "podman_runtime".to_string(),
+            ServiceConfig {
+                manager: "podman_machine".to_string(),
+                unit: None,
+                compose_file: None,
+                compose_override: None,
+                project: None,
+                env_file: None,
+                machine: Some("${PODMAN_MACHINE_NAME}".to_string()),
+                depends_on: None,
+            },
+        );
+        services.insert(
+            "mempool".to_string(),
+            ServiceConfig {
+                manager: "podman_compose".to_string(),
+                unit: None,
+                compose_file: Some("${MEMPOOL_COMPOSE_FILE}".to_string()),
+                compose_override: Some("${MEMPOOL_COMPOSE_OVERRIDE}".to_string()),
+                project: Some("${MEMPOOL_PROJECT}".to_string()),
+                env_file: Some("${MEMPOOL_ENV_FILE}".to_string()),
+                machine: None,
+                depends_on: Some(vec!["podman_runtime".to_string()]),
+            },
+        );
+        BelterConfig {
+            service: Some(services),
+        }
+    }
 
     #[test]
     fn bring_up_action_restarts_degraded_mempool() {
@@ -1432,6 +1609,27 @@ mod tests {
             RuntimeState::Unknown
         )
         .is_none());
+    }
+
+    #[test]
+    fn bring_up_runtime_recovery_service_finds_podman_machine_dependency() {
+        let config = mempool_with_runtime_config();
+        assert_eq!(
+            bring_up_runtime_recovery_service(&config, "mempool").as_deref(),
+            Some("podman_runtime")
+        );
+        assert!(bring_up_runtime_recovery_service(&config, "podman_runtime").is_none());
+    }
+
+    #[test]
+    fn bring_up_runtime_retry_action_restarts_only_degraded_runtime() {
+        assert!(matches!(
+            bring_up_runtime_retry_action_after_failed_readiness(RuntimeState::Degraded),
+            Some(ServiceAction::Restart)
+        ));
+        assert!(
+            bring_up_runtime_retry_action_after_failed_readiness(RuntimeState::Running).is_none()
+        );
     }
 
     #[test]
