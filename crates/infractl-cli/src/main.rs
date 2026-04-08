@@ -17,8 +17,8 @@ use crate::cli::{
 use crate::commands::config::{init_config_file, validate_config_file};
 use crate::commands::health::{PoolHealthRequest, emit_pool_health};
 use crate::commands::service::{
-    StatusEmitCtx, emit_list, emit_plan, emit_status, execute_service_bring_up_from_config,
-    execute_service_command_from_config,
+    StatusEmitCtx, emit_list, emit_plan, emit_status, emit_status_all,
+    execute_service_bring_up_from_config, execute_service_command_from_config,
 };
 #[cfg(test)]
 use crate::output::output_envelope;
@@ -161,13 +161,14 @@ fn run<C: Clock, E: EnvResolver, D: DotenvLoader, O: Write>(
                     service_name,
                     ui_mode: ui.effective(),
                 }),
-                None => emit(
+                None => emit_status_all(
                     &deps.clock,
                     stdout,
                     cli.json,
                     cli.dry_run,
-                    "service.status",
-                    &format!("status target=all ui={:?}", ui.effective()),
+                    &effective_config_path,
+                    &deps.env_resolver,
+                    ui.effective(),
                 ),
             },
             ServiceCommand::Start { name } => emit_plan(

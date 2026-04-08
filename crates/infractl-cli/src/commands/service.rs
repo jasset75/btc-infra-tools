@@ -133,6 +133,11 @@ impl ServiceStatusData {
     }
 }
 
+#[derive(Serialize)]
+struct AggregatedServiceStatusData {
+    services: Vec<ServiceStatusData>,
+}
+
 pub(crate) struct StatusEmitCtx<'a, W: Write> {
     pub(crate) clock: &'a dyn Clock,
     pub(crate) stdout: &'a mut W,
@@ -277,6 +282,111 @@ pub(crate) fn emit_status<W: Write>(ctx: StatusEmitCtx<'_, W>) -> Result<()> {
         &computed.message,
         computed.data,
     )
+}
+
+pub(crate) fn emit_status_all<W: Write>(
+    clock: &dyn Clock,
+    stdout: &mut W,
+    json: bool,
+    dry_run: bool,
+    config_path: &PathBuf,
+    env_resolver: &dyn EnvResolver,
+    ui_mode: UiMode,
+) -> Result<()> {
+    let raw = fs::read_to_string(config_path)
+        .with_context(|| format!("failed to read config file {}", config_path.display()))?;
+    let config: BelterConfig = toml::from_str(&raw)
+        .with_context(|| format!("failed to parse TOML from {}", config_path.display()))?;
+
+    let mut service_names: Vec<String> = config
+        .service
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("missing [service] section"))?
+        .keys()
+        .cloned()
+        .collect();
+    service_names.sort();
+
+    if dry_run {
+        let out = output_envelope(
+            clock,
+            "service.status",
+            "ok",
+            &format!(
+                "would query status target=all services={} ui={ui_mode:?}",
+                service_names.len()
+            ),
+            true,
+            json!({
+                "services": service_names
+                    .iter()
+                    .map(|service| json!({
+                        "service": service,
+                        "simulated": true,
+                    }))
+                    .collect::<Vec<_>>(),
+            }),
+            Vec::new(),
+        );
+        if json {
+            writeln!(stdout, "{}", serde_json::to_string_pretty(&out)?)?;
+        } else {
+            writeln!(stdout, "[{}] {}: {}", out.ts, out.command, out.message)?;
+            emit_dry_run_report(stdout, &out)?;
+        }
+        return Ok(());
+    }
+
+    let services = config
+        .service
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("missing [service] section"))?;
+    let mut computed = Vec::with_capacity(service_names.len());
+    for service_name in &service_names {
+        let service = services
+            .get(service_name)
+            .ok_or_else(|| anyhow::anyhow!("service `{service_name}` not found in config"))?;
+        let ctx = StatusEmitCtx {
+            clock,
+            stdout,
+            json,
+            dry_run,
+            config_path,
+            env_resolver,
+            service_name,
+            ui_mode,
+        };
+        computed.push(compute_status(&ctx, service)?);
+    }
+
+    let unknown = computed
+        .iter()
+        .filter(|item| item.data.state == "unknown")
+        .count();
+    let degraded = computed
+        .iter()
+        .filter(|item| item.data.state == "degraded")
+        .count();
+    let running = computed
+        .iter()
+        .filter(|item| item.data.state == "running")
+        .count();
+    let stopped = computed
+        .iter()
+        .filter(|item| item.data.state == "stopped")
+        .count();
+    let message = format!(
+        "status target=all ui={ui_mode:?} services={} running={} stopped={} degraded={} unknown={}",
+        computed.len(),
+        running,
+        stopped,
+        degraded,
+        unknown
+    );
+    let data = AggregatedServiceStatusData {
+        services: computed.into_iter().map(|item| item.data).collect(),
+    };
+    emit_status_all_out(clock, stdout, json, &message, data)
 }
 
 fn compute_status(
@@ -605,6 +715,52 @@ fn emit_status_out<W: Write>(
         writeln!(stdout, "{}", serde_json::to_string_pretty(&out)?)?;
     } else {
         writeln!(stdout, "[{}] {}: {}", out.ts, out.command, out.message)?;
+    }
+    Ok(())
+}
+
+fn emit_status_all_out<W: Write>(
+    clock: &dyn Clock,
+    stdout: &mut W,
+    json: bool,
+    message: &str,
+    status_data: AggregatedServiceStatusData,
+) -> Result<()> {
+    let data = serde_json::to_value(status_data).context("failed to serialize status data")?;
+    let out = output_envelope(
+        clock,
+        "service.status",
+        "ok",
+        message,
+        false,
+        data,
+        Vec::new(),
+    );
+    if json {
+        writeln!(stdout, "{}", serde_json::to_string_pretty(&out)?)?;
+    } else {
+        writeln!(stdout, "[{}] {}: {}", out.ts, out.command, out.message)?;
+        let services = out
+            .data
+            .get("services")
+            .and_then(|value| value.as_array())
+            .cloned()
+            .unwrap_or_default();
+        for service in services {
+            let name = service
+                .get("service")
+                .and_then(|value| value.as_str())
+                .unwrap_or("unknown");
+            let manager = service
+                .get("manager")
+                .and_then(|value| value.as_str())
+                .unwrap_or("unknown");
+            let state = service
+                .get("state")
+                .and_then(|value| value.as_str())
+                .unwrap_or("unknown");
+            writeln!(stdout, "- {name} ({manager}) state={state}")?;
+        }
     }
     Ok(())
 }
