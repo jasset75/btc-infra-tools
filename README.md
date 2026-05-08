@@ -42,6 +42,10 @@ Example config:
 ```toml
 version = 1
 
+[logging]
+stdout_path = "$HOME/.local/state/belter-watchdog/logs/watchdog.out.log"
+stderr_path = "$HOME/.local/state/belter-watchdog/logs/watchdog.err.log"
+
 [defaults]
 interval_seconds = 600
 confirm_after_seconds = 30

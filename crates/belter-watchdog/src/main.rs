@@ -4,7 +4,7 @@ use infractl_core::time::{Clock, SystemClock};
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::HashMap;
-use std::fs;
+use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -45,9 +45,17 @@ enum WatchdogCommand {
 struct WatchdogConfig {
     version: u32,
     #[serde(default)]
+    logging: LoggingConfig,
+    #[serde(default)]
     defaults: WatchDefaults,
     #[serde(default)]
     watch: Vec<WatchConfig>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct LoggingConfig {
+    stdout_path: Option<String>,
+    stderr_path: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -124,7 +132,8 @@ fn run<W: Write>(cli: &Cli, clock: &dyn Clock, stdout: &mut W) -> Result<()> {
         WatchdogCommand::Run { config, once } => {
             let config = load_config(config)?;
             validate_config(&config)?;
-            run_watchdog(&config, *once, clock, stdout)
+            let mut log_writer = open_log_writer(&config.logging, stdout)?;
+            run_watchdog(&config, *once, clock, &mut log_writer)
         }
         WatchdogCommand::Init { path, force } => init_config(path, *force, stdout),
     }
@@ -146,6 +155,16 @@ fn validate_config(config: &WatchdogConfig) -> Result<()> {
     }
     if config.watch.is_empty() {
         bail!("watchdog config must define at least one [[watch]] entry");
+    }
+    if let Some(path) = &config.logging.stdout_path
+        && path.trim().is_empty()
+    {
+        bail!("logging.stdout_path cannot be empty when set");
+    }
+    if let Some(path) = &config.logging.stderr_path
+        && path.trim().is_empty()
+    {
+        bail!("logging.stderr_path cannot be empty when set");
     }
 
     for watch in &config.watch {
@@ -173,6 +192,79 @@ fn validate_config(config: &WatchdogConfig) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn open_log_writer<'a, W: Write>(
+    logging: &LoggingConfig,
+    stdout: &'a mut W,
+) -> Result<Box<dyn Write + 'a>> {
+    match (
+        logging.stdout_path.as_deref(),
+        logging.stderr_path.as_deref(),
+    ) {
+        (None, None) => Ok(Box::new(stdout)),
+        (Some(path), None) | (None, Some(path)) => Ok(Box::new(open_append_log(path)?)),
+        (Some(stdout_path), Some(stderr_path)) if stdout_path == stderr_path => {
+            Ok(Box::new(open_append_log(stdout_path)?))
+        }
+        (Some(stdout_path), Some(stderr_path)) => Ok(Box::new(MultiWriter {
+            stdout: open_append_log(stdout_path)?,
+            stderr: open_append_log(stderr_path)?,
+        })),
+    }
+}
+
+fn open_append_log(path: &str) -> Result<fs::File> {
+    let expanded = expand_home(path)?;
+    if let Some(parent) = expanded.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create log directory {}", parent.display()))?;
+    }
+
+    OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&expanded)
+        .with_context(|| format!("failed to open log file {}", expanded.display()))
+}
+
+fn expand_home(path: &str) -> Result<PathBuf> {
+    if path == "$HOME" || path == "~" {
+        return home_dir();
+    }
+    if let Some(rest) = path.strip_prefix("$HOME/") {
+        return Ok(home_dir()?.join(rest));
+    }
+    if let Some(rest) = path.strip_prefix("~/") {
+        return Ok(home_dir()?.join(rest));
+    }
+    Ok(PathBuf::from(path))
+}
+
+fn home_dir() -> Result<PathBuf> {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .ok_or_else(|| anyhow!("HOME is not set; cannot expand watchdog log path"))
+}
+
+struct MultiWriter {
+    stdout: fs::File,
+    stderr: fs::File,
+}
+
+impl Write for MultiWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.stdout.write_all(buf)?;
+        self.stderr.write_all(buf)?;
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.stdout.flush()?;
+        self.stderr.flush()
+    }
 }
 
 fn run_watchdog<W: Write>(
@@ -482,6 +574,10 @@ fn init_config<W: Write>(path: &Path, force: bool, stdout: &mut W) -> Result<()>
 fn default_config_template() -> &'static str {
     r#"version = 1
 
+[logging]
+stdout_path = "$HOME/.local/state/belter-watchdog/logs/watchdog.out.log"
+stderr_path = "$HOME/.local/state/belter-watchdog/logs/watchdog.err.log"
+
 [defaults]
 interval_seconds = 600
 confirm_after_seconds = 30
@@ -613,6 +709,7 @@ mod tests {
     fn effective_watch_uses_defaults() {
         let config = WatchdogConfig {
             version: 1,
+            logging: LoggingConfig::default(),
             defaults: WatchDefaults {
                 interval_seconds: Some(600),
                 confirm_after_seconds: Some(30),
@@ -642,6 +739,17 @@ mod tests {
         assert_eq!(
             rendered,
             "[2026-05-08T15:00:00Z] check.result: watch=mempool state=healthy\n"
+        );
+    }
+
+    #[test]
+    fn expand_home_rewrites_home_prefix() {
+        let home = std::env::var("HOME").expect("HOME should be set in tests");
+        let expanded = expand_home("$HOME/.local/state/example.log").expect("expanded path");
+
+        assert_eq!(
+            expanded,
+            PathBuf::from(home).join(".local/state/example.log")
         );
     }
 }
