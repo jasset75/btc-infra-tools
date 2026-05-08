@@ -3,6 +3,7 @@ members = [
   "crates/infractl-core",
   "crates/infractl-adapters",
   "crates/infractl-cli",
+  "crates/belter-watchdog",
 ]
 resolver = "2"
 

@@ -64,7 +64,7 @@ All contributors (human or AI agents) must follow these rules.
 
 ## Path Rules
 - Use relative filesystem paths only in repository-tracked files (docs, examples, config templates, comments).
-- Do not commit absolute local paths (for example `/Users/...`, `/home/...`, `C:\...`).
+- Do not commit absolute local paths. Use placeholders such as `<home>`, `<repo>`, or `<config_dir>` instead.
 
 ## Contribution Workflow for Agents
 1. Restate the requested change and assumptions.

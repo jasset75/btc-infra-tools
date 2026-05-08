@@ -140,7 +140,7 @@ Beyond roadmap validation, changelog migration, and semantic versioning, also ch
 - Git consistency: no missing or duplicate release tag for the target version.
 - Remote publish consistency: the release tag exists on `origin`, not only in the local repository.
 - Date consistency: release heading date should match the actual publication date.
-- Documentation consistency: `README.md` and [belter-command-reference.md](/Users/juan/work/btc-infra-upstream/btc-infra-tools/docs/belter-command-reference.md) should not describe shipped commands as scaffold behavior unless that is an intentional release limitation.
+- Documentation consistency: `README.md` and [belter-command-reference.md](belter-command-reference.md) should not describe shipped commands as scaffold behavior unless that is an intentional release limitation.
 - Config compatibility: note any config migration or new required env vars in the release notes.
 - JSON contract stability: if machine-readable output changes, call it out explicitly as a breaking or operator-relevant change.
 - Installation path: verify the installed `belter` being invoked is the one built from this workspace.

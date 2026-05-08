@@ -73,6 +73,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "belter-watchdog"
+version = "0.1.1"
+dependencies = [
+ "anyhow",
+ "clap",
+ "infractl-core",
+ "serde",
+ "serde_json",
+ "toml",
+]
+
+[[package]]
 name = "clap"
 version = "4.5.60"
 source = "registry+https://github.com/rust-lang/crates.io-index"

@@ -21,7 +21,9 @@ _prepare-install-config:
 install:
   just _prepare-install-config
   cargo install --path crates/infractl-cli --locked --root ~/.local --force
+  cargo install --path crates/belter-watchdog --locked --root ~/.local --force
   ~/.local/bin/belter --version
+  ~/.local/bin/belter-watchdog --version
 
 install-latest-stable:
   #!/usr/bin/env zsh
@@ -35,7 +37,9 @@ install-latest-stable:
   git checkout "${tag}"
   just _prepare-install-config
   cargo install --path crates/infractl-cli --locked --root ~/.local --force
+  cargo install --path crates/belter-watchdog --locked --root ~/.local --force
   ~/.local/bin/belter --version
+  ~/.local/bin/belter-watchdog --version
 
 check:
   cargo check --workspace
@@ -51,3 +55,6 @@ test:
 
 test-cli:
   cargo test -p belter --all-targets
+
+test-watchdog:
+  cargo test -p belter-watchdog --all-targets

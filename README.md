@@ -13,6 +13,7 @@ Monorepo for `belter`, a Rust CLI/TUI for infrastructure operations.
 - `crates/infractl-core`: config/output/time primitives
 - `crates/infractl-adapters`: service manager abstraction (launchd/systemd/podman, etc.)
 - `crates/infractl-cli`: `belter` binary (`clap`-based)
+- `crates/belter-watchdog`: `belter-watchdog` binary for command-based recovery loops
 
 ## Quick Start
 - Build and run a first command: `cargo run -p belter -- service list`
@@ -31,6 +32,43 @@ Monorepo for `belter`, a Rust CLI/TUI for infrastructure operations.
   - Per-service runtime env loading for `podman_compose` services via `env_file`.
   - HTTP-aware `mempool` status and readiness checks.
   - Actionable launchd restart errors for target format and privilege requirements.
+
+### Belter Watchdog
+
+`belter-watchdog` is a small command-based recovery loop for services that should be kept available without embedding service-specific recovery logic in the watchdog itself.
+
+Example config:
+
+```toml
+version = 1
+
+[defaults]
+interval_seconds = 600
+confirm_after_seconds = 30
+cooldown_seconds = 600
+timeout_seconds = 120
+shell = ["zsh", "-lc"]
+
+[[watch]]
+name = "mempool"
+diagnose = "belter --json service status mempool"
+recovery = "belter service bring-up mempool"
+healthy_json_path = ".data.state"
+healthy_equals = "running"
+healthy_exit_code = 0
+```
+
+Run once for validation:
+
+```bash
+belter-watchdog run --config watchdog.toml --once
+```
+
+Run continuously under `launchd`:
+
+```bash
+belter-watchdog run --config ~/.config/belter/watchdog.toml
+```
 
 ## Operator Setup (macOS, repo-local mise)
 
