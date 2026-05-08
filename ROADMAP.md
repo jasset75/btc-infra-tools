@@ -17,14 +17,14 @@ Current versioning intent:
 ## 0.1.2
 
 Goal:
-- remove the most visible operator-facing scaffolds in the `service` command group.
+- ship the already implemented service discovery/status hardening and operator install improvements.
 
-Planned:
+Completed:
 - [x] Replace static `service list` with config-driven discovery
-- [ ] Implement real `service status` for all configured services (`service status` without `name`)
-- [ ] Implement real `service logs <name>`
-- [ ] Add integration tests for aggregated service status and logs
+- [x] Implement real `service status` for all configured services (`service status` without `name`)
+- [x] Add integration tests for aggregated service status
 - [x] Add a `just` workflow to install the latest stable tagged release on operator nodes
+- [x] Add `belter-watchdog` for command-based service recovery loops
 
 Why this release:
 - this closes the biggest UX gap after `bring-up` by making the service control plane feel complete enough for daily use.
@@ -49,6 +49,8 @@ Goal:
 - address remaining executable scaffolds and low-risk productization gaps before calling the CLI stable.
 
 Planned candidates:
+- [ ] Implement real `service logs <name>`
+- [ ] Add integration tests for `service logs <name>`
 - [ ] Implement real `run action <id>`
 - [ ] Remove `tui dashboard` from the public CLI unless it gains a clearly defined operational purpose before `1.0.0`
 - [ ] Extend `service bring-up` beyond `mempool` where real operational value exists
@@ -64,8 +66,8 @@ The target for `1.0.0` is not “every planned idea implemented”.
 The target is “the executable no longer exposes scaffold commands in its shipped surface”.
 
 Required before `1.0.0`:
-- [ ] `service list` is real
-- [ ] `service status` without `name` is real
+- [x] `service list` is real
+- [x] `service status` without `name` is real
 - [ ] `service logs <name>` is real
 - [ ] `health check` is real
 - [ ] `health snapshot` is real

@@ -10,11 +10,17 @@ This section includes implemented changes that are not released yet.
 
 ### Added
 - Implemented real `service list` with config-driven discovery from `belter.toml`.
+- Implemented real aggregated `service status` for all configured services when no service name is provided.
 - Added `just install-latest-stable` to install `belter` from the newest tagged release instead of the current branch tip.
 - Added deterministic config/env discovery for `belter` across Linux/macOS:
   - config resolution now follows `--config`, `BELTER_CONFIG`, XDG config path, then local `belter.toml`
   - `.env` loading now follows `BELTER_ENV_FILE`, config-local `.env`, then local `./.env`
   - `config init` now defaults to the standard XDG config location when available
+- Added `belter-watchdog`, a command-based watchdog binary for periodically diagnosing configured services and running recovery commands when health checks fail:
+  - supports `watchdog.toml` with per-watch intervals, confirmation delays, cooldowns, command timeouts, shell configuration, JSON field checks, and expected exit codes,
+  - supports `belter-watchdog init` for generating a starter config,
+  - supports `belter-watchdog run --once` for one-shot validation before installing a supervisor,
+  - supports `[logging]` paths in `watchdog.toml`, creates log directories automatically, and writes normal events and error events to separate files when configured.
 
 ### Changed
 - Updated `service list` output to report the configured services, their managers, and declared dependencies in stable sorted order for both text and `--json`.
@@ -24,6 +30,7 @@ This section includes implemented changes that are not released yet.
   - seed repo-root `.env` from `.env.example` when missing
   - treat repo-root `.env` as the source of truth for installed config
   - overwrite repo-root `.env` and `belter.toml` into the standard config directory on each install
+- Updated `just install` and `just install-latest-stable` to install both `belter` and `belter-watchdog`.
 - Hardened Podman-backed service recovery and diagnostics:
   - `service status mempool` now reports the real host HTTP status-line failure instead of a generic read error for keep-alive responses,
   - `service bring-up mempool` now uses `restart` for initial `degraded` state and retries `unknown` readiness failures with `restart`,
