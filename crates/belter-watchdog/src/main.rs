@@ -132,8 +132,8 @@ fn run<W: Write>(cli: &Cli, clock: &dyn Clock, stdout: &mut W) -> Result<()> {
         WatchdogCommand::Run { config, once } => {
             let config = load_config(config)?;
             validate_config(&config)?;
-            let mut log_writer = open_log_writer(&config.logging, stdout)?;
-            run_watchdog(&config, *once, clock, &mut log_writer)
+            let mut logger = open_logger(&config.logging, stdout)?;
+            run_watchdog(&config, *once, clock, &mut logger)
         }
         WatchdogCommand::Init { path, force } => init_config(path, *force, stdout),
     }
@@ -194,24 +194,19 @@ fn validate_config(config: &WatchdogConfig) -> Result<()> {
     Ok(())
 }
 
-fn open_log_writer<'a, W: Write>(
-    logging: &LoggingConfig,
-    stdout: &'a mut W,
-) -> Result<Box<dyn Write + 'a>> {
-    match (
-        logging.stdout_path.as_deref(),
-        logging.stderr_path.as_deref(),
-    ) {
-        (None, None) => Ok(Box::new(stdout)),
-        (Some(path), None) | (None, Some(path)) => Ok(Box::new(open_append_log(path)?)),
-        (Some(stdout_path), Some(stderr_path)) if stdout_path == stderr_path => {
-            Ok(Box::new(open_append_log(stdout_path)?))
+fn open_logger<'a, W: Write>(logging: &LoggingConfig, stdout: &'a mut W) -> Result<Logger<'a>> {
+    let stdout: Box<dyn Write + 'a> = match logging.stdout_path.as_deref() {
+        Some(path) => Box::new(open_append_log(path)?),
+        None => Box::new(stdout),
+    };
+    let stderr: Option<Box<dyn Write + 'a>> = match logging.stderr_path.as_deref() {
+        Some(path) if Some(path) != logging.stdout_path.as_deref() => {
+            Some(Box::new(open_append_log(path)?))
         }
-        (Some(stdout_path), Some(stderr_path)) => Ok(Box::new(MultiWriter {
-            stdout: open_append_log(stdout_path)?,
-            stderr: open_append_log(stderr_path)?,
-        })),
-    }
+        _ => None,
+    };
+
+    Ok(Logger { stdout, stderr })
 }
 
 fn open_append_log(path: &str) -> Result<fs::File> {
@@ -249,29 +244,38 @@ fn home_dir() -> Result<PathBuf> {
         .ok_or_else(|| anyhow!("HOME is not set; cannot expand watchdog log path"))
 }
 
-struct MultiWriter {
-    stdout: fs::File,
-    stderr: fs::File,
+struct Logger<'a> {
+    stdout: Box<dyn Write + 'a>,
+    stderr: Option<Box<dyn Write + 'a>>,
 }
 
-impl Write for MultiWriter {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.stdout.write_all(buf)?;
-        self.stderr.write_all(buf)?;
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
+impl Logger<'_> {
+    fn info(&mut self, message: &str) -> Result<()> {
+        writeln!(self.stdout, "{message}")?;
         self.stdout.flush()?;
-        self.stderr.flush()
+        Ok(())
+    }
+
+    fn error(&mut self, message: &str) -> Result<()> {
+        match &mut self.stderr {
+            Some(stderr) => {
+                writeln!(stderr, "{message}")?;
+                stderr.flush()?;
+            }
+            None => {
+                writeln!(self.stdout, "{message}")?;
+                self.stdout.flush()?;
+            }
+        }
+        Ok(())
     }
 }
 
-fn run_watchdog<W: Write>(
+fn run_watchdog(
     config: &WatchdogConfig,
     once: bool,
     clock: &dyn Clock,
-    stdout: &mut W,
+    logger: &mut Logger<'_>,
 ) -> Result<()> {
     let enabled: Vec<_> = config.watch.iter().filter(|watch| watch.enabled).collect();
     if enabled.is_empty() {
@@ -292,13 +296,13 @@ fn run_watchdog<W: Write>(
                 continue;
             }
 
-            let next_delay = match run_watch_cycle(&effective, clock, stdout) {
+            let next_delay = match run_watch_cycle(&effective, clock, logger) {
                 Ok(next_delay) => next_delay,
                 Err(err) if once => return Err(err),
                 Err(err) => {
-                    log_line(
+                    log_error(
                         clock,
-                        stdout,
+                        logger,
                         &watch.name,
                         "watch.error",
                         &format!("error={}", sanitize_log_detail(&err.to_string())),
@@ -319,16 +323,16 @@ fn run_watchdog<W: Write>(
     }
 }
 
-fn run_watch_cycle<W: Write>(
+fn run_watch_cycle(
     watch: &EffectiveWatch<'_>,
     clock: &dyn Clock,
-    stdout: &mut W,
+    logger: &mut Logger<'_>,
 ) -> Result<Duration> {
-    log_line(clock, stdout, &watch.config.name, "check.start", "")?;
+    log_line(clock, logger, &watch.config.name, "check.start", "")?;
     let initial = run_diagnose(watch)?;
     log_line(
         clock,
-        stdout,
+        logger,
         &watch.config.name,
         "check.result",
         health_label(initial),
@@ -341,7 +345,7 @@ fn run_watch_cycle<W: Write>(
     if !watch.confirm_after.is_zero() {
         log_line(
             clock,
-            stdout,
+            logger,
             &watch.config.name,
             "check.confirm_wait",
             &format!("seconds={}", watch.confirm_after.as_secs()),
@@ -351,7 +355,7 @@ fn run_watch_cycle<W: Write>(
         let confirmed = run_diagnose(watch)?;
         log_line(
             clock,
-            stdout,
+            logger,
             &watch.config.name,
             "check.confirm_result",
             health_label(confirmed),
@@ -362,12 +366,12 @@ fn run_watch_cycle<W: Write>(
         }
     }
 
-    log_line(clock, stdout, &watch.config.name, "recovery.start", "")?;
+    log_line(clock, logger, &watch.config.name, "recovery.start", "")?;
     let recovery = run_shell_command(&watch.shell, &watch.config.recovery, watch.timeout)
         .with_context(|| format!("failed to run recovery for `{}`", watch.config.name))?;
     log_line(
         clock,
-        stdout,
+        logger,
         &watch.config.name,
         "recovery.done",
         &format!(
@@ -390,7 +394,7 @@ fn run_watch_cycle<W: Write>(
     let post = run_diagnose(watch)?;
     log_line(
         clock,
-        stdout,
+        logger,
         &watch.config.name,
         "recovery.post_check",
         health_label(post),
@@ -405,7 +409,7 @@ fn run_watch_cycle<W: Write>(
     if !watch.cooldown.is_zero() {
         log_line(
             clock,
-            stdout,
+            logger,
             &watch.config.name,
             "cooldown",
             &format!("seconds={}", watch.cooldown.as_secs()),
@@ -618,28 +622,35 @@ fn sanitize_log_detail(value: &str) -> String {
     value.replace(['\r', '\n'], " ")
 }
 
-fn log_line<W: Write>(
+fn format_log_line(clock: &dyn Clock, watch: &str, event: &str, detail: &str) -> String {
+    if detail.is_empty() {
+        format!("[{}] {event}: watch={watch}", clock.now_utc_rfc3339())
+    } else {
+        format!(
+            "[{}] {event}: watch={watch} {detail}",
+            clock.now_utc_rfc3339()
+        )
+    }
+}
+
+fn log_line(
     clock: &dyn Clock,
-    stdout: &mut W,
+    logger: &mut Logger<'_>,
     watch: &str,
     event: &str,
     detail: &str,
 ) -> Result<()> {
-    if detail.is_empty() {
-        writeln!(
-            stdout,
-            "[{}] {event}: watch={watch}",
-            clock.now_utc_rfc3339()
-        )?;
-    } else {
-        writeln!(
-            stdout,
-            "[{}] {event}: watch={watch} {detail}",
-            clock.now_utc_rfc3339()
-        )?;
-    }
-    stdout.flush()?;
-    Ok(())
+    logger.info(&format_log_line(clock, watch, event, detail))
+}
+
+fn log_error(
+    clock: &dyn Clock,
+    logger: &mut Logger<'_>,
+    watch: &str,
+    event: &str,
+    detail: &str,
+) -> Result<()> {
+    logger.error(&format_log_line(clock, watch, event, detail))
 }
 
 #[cfg(test)]
@@ -731,14 +742,10 @@ mod tests {
     #[test]
     fn log_line_writes_stable_event_shape() {
         let clock = FixedClock::new("2026-05-08T15:00:00Z");
-        let mut out = Vec::new();
 
-        log_line(&clock, &mut out, "mempool", "check.result", "state=healthy").expect("log line");
-
-        let rendered = String::from_utf8(out).expect("utf8");
         assert_eq!(
-            rendered,
-            "[2026-05-08T15:00:00Z] check.result: watch=mempool state=healthy\n"
+            format_log_line(&clock, "mempool", "check.result", "state=healthy"),
+            "[2026-05-08T15:00:00Z] check.result: watch=mempool state=healthy"
         );
     }
 
