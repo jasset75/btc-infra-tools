@@ -20,7 +20,8 @@ This section includes implemented changes that are not released yet.
   - supports `watchdog.toml` with per-watch intervals, confirmation delays, cooldowns, command timeouts, shell configuration, JSON field checks, and expected exit codes,
   - supports `belter-watchdog init` for generating a starter config,
   - supports `belter-watchdog run --once` for one-shot validation before installing a supervisor,
-  - supports `[logging]` paths in `watchdog.toml`, creates log directories automatically, and writes normal events and error events to separate files when configured.
+  - supports `[logging]` paths in `watchdog.toml`, creates log directories automatically, and writes normal events and error events to separate files when configured,
+  - supports `belter-watchdog stats` with per-watch outage/recovery metrics and `--json` output.
 
 ### Changed
 - Updated `service list` output to report the configured services, their managers, and declared dependencies in stable sorted order for both text and `--json`.

@@ -1,20 +1,23 @@
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Parser, Subcommand};
 use infractl_core::time::{Clock, SystemClock};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs::{self, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
+use time::OffsetDateTime;
+use time::format_description::well_known::Rfc3339;
 
 const DEFAULT_INTERVAL_SECONDS: u64 = 600;
 const DEFAULT_CONFIRM_AFTER_SECONDS: u64 = 30;
 const DEFAULT_COOLDOWN_SECONDS: u64 = 600;
 const DEFAULT_TIMEOUT_SECONDS: u64 = 120;
+const DEFAULT_STDOUT_LOG_PATH: &str = "$HOME/.local/state/belter-watchdog/logs/watchdog.out.log";
 
 #[derive(Parser)]
 #[command(name = "belter-watchdog")]
@@ -38,6 +41,14 @@ enum WatchdogCommand {
         path: PathBuf,
         #[arg(long)]
         force: bool,
+    },
+    Stats {
+        #[arg(long, default_value = DEFAULT_STDOUT_LOG_PATH)]
+        log: String,
+        #[arg(long)]
+        watch: Option<String>,
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -136,6 +147,16 @@ fn run<W: Write>(cli: &Cli, clock: &dyn Clock, stdout: &mut W) -> Result<()> {
             run_watchdog(&config, *once, clock, &mut logger)
         }
         WatchdogCommand::Init { path, force } => init_config(path, *force, stdout),
+        WatchdogCommand::Stats { log, watch, json } => {
+            let stats = build_stats_report(log, watch.as_deref())?;
+            if *json {
+                serde_json::to_writer_pretty(&mut *stdout, &stats)?;
+                writeln!(stdout)?;
+            } else {
+                write_stats_report(stdout, &stats)?;
+            }
+            Ok(())
+        }
     }
 }
 
@@ -561,6 +582,402 @@ fn json_value_equals(value: &Value, expected: &str) -> bool {
     }
 }
 
+#[derive(Debug)]
+struct LogEvent {
+    timestamp: OffsetDateTime,
+    event: String,
+    watch: String,
+    fields: HashMap<String, String>,
+}
+
+#[derive(Debug)]
+struct OutageIncident {
+    outage_at: OffsetDateTime,
+    recovery_started_at: Option<OffsetDateTime>,
+    recovery_done_at: Option<OffsetDateTime>,
+    recovery_exit_code: Option<String>,
+    recovery_timed_out: Option<bool>,
+    recovered_at: Option<OffsetDateTime>,
+}
+
+#[derive(Debug, Default)]
+struct WatchStatsBuilder {
+    incidents: Vec<OutageIncident>,
+    open_incident: Option<OutageIncident>,
+    last_known_state: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct StatsReport {
+    log_path: String,
+    watch_filter: Option<String>,
+    total: StatsTotals,
+    watches: Vec<WatchStatsReport>,
+}
+
+#[derive(Debug, Default, Serialize)]
+struct StatsTotals {
+    confirmed_outages: usize,
+    recovered: usize,
+    unrecovered: usize,
+    recovery_attempts: usize,
+    recovery_command_failures: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct WatchStatsReport {
+    watch: String,
+    confirmed_outages: usize,
+    recovered: usize,
+    unrecovered: usize,
+    recovery_attempts: usize,
+    recovery_command_failures: usize,
+    recovery_success_rate: Option<f64>,
+    average_recovery_seconds: Option<i64>,
+    min_recovery_seconds: Option<i64>,
+    max_recovery_seconds: Option<i64>,
+    average_seconds_between_outages: Option<i64>,
+    min_seconds_between_outages: Option<i64>,
+    max_seconds_between_outages: Option<i64>,
+    last_outage: Option<String>,
+    last_recovery: Option<String>,
+    last_known_state: Option<String>,
+}
+
+fn build_stats_report(log_path: &str, watch_filter: Option<&str>) -> Result<StatsReport> {
+    let expanded = expand_home(log_path)?;
+    let file = fs::File::open(&expanded)
+        .with_context(|| format!("failed to open watchdog log {}", expanded.display()))?;
+    let reader = BufReader::new(file);
+    let mut builders: BTreeMap<String, WatchStatsBuilder> = BTreeMap::new();
+
+    for line in reader.lines() {
+        let line = line?;
+        let Some(event) = parse_log_event(&line) else {
+            continue;
+        };
+        if watch_filter.is_some_and(|watch| event.watch != watch) {
+            continue;
+        }
+        builders
+            .entry(event.watch.clone())
+            .or_default()
+            .apply(event);
+    }
+
+    let mut total = StatsTotals::default();
+    let mut watches = Vec::new();
+    for (watch, mut builder) in builders {
+        let report = builder.finish(watch);
+        total.confirmed_outages += report.confirmed_outages;
+        total.recovered += report.recovered;
+        total.unrecovered += report.unrecovered;
+        total.recovery_attempts += report.recovery_attempts;
+        total.recovery_command_failures += report.recovery_command_failures;
+        watches.push(report);
+    }
+
+    Ok(StatsReport {
+        log_path: expanded.display().to_string(),
+        watch_filter: watch_filter.map(str::to_string),
+        total,
+        watches,
+    })
+}
+
+impl WatchStatsBuilder {
+    fn apply(&mut self, event: LogEvent) {
+        if let Some(state) = event.fields.get("state")
+            && matches!(
+                event.event.as_str(),
+                "check.result" | "check.confirm_result" | "recovery.post_check"
+            )
+        {
+            self.last_known_state = Some(state.clone());
+        }
+
+        match event.event.as_str() {
+            "check.confirm_result"
+                if event.fields.get("state").is_some_and(|s| s == "unhealthy") =>
+            {
+                if let Some(open) = self.open_incident.take() {
+                    self.incidents.push(open);
+                }
+                self.open_incident = Some(OutageIncident {
+                    outage_at: event.timestamp,
+                    recovery_started_at: None,
+                    recovery_done_at: None,
+                    recovery_exit_code: None,
+                    recovery_timed_out: None,
+                    recovered_at: None,
+                });
+            }
+            "recovery.start" => {
+                if let Some(incident) = &mut self.open_incident {
+                    incident.recovery_started_at = Some(event.timestamp);
+                }
+            }
+            "recovery.done" => {
+                if let Some(incident) = &mut self.open_incident {
+                    incident.recovery_done_at = Some(event.timestamp);
+                    incident.recovery_exit_code = event.fields.get("exit_code").cloned();
+                    incident.recovery_timed_out = event
+                        .fields
+                        .get("timed_out")
+                        .and_then(|value| value.parse().ok());
+                }
+            }
+            "recovery.post_check" if event.fields.get("state").is_some_and(|s| s == "healthy") => {
+                if let Some(mut incident) = self.open_incident.take() {
+                    incident.recovered_at = Some(event.timestamp);
+                    self.incidents.push(incident);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn finish(&mut self, watch: String) -> WatchStatsReport {
+        if let Some(open) = self.open_incident.take() {
+            self.incidents.push(open);
+        }
+
+        self.incidents.sort_by_key(|incident| incident.outage_at);
+        let confirmed_outages = self.incidents.len();
+        let recovered = self
+            .incidents
+            .iter()
+            .filter(|incident| incident.recovered_at.is_some())
+            .count();
+        let unrecovered = confirmed_outages.saturating_sub(recovered);
+        let recovery_attempts = self
+            .incidents
+            .iter()
+            .filter(|incident| incident.recovery_started_at.is_some())
+            .count();
+        let recovery_command_failures = self
+            .incidents
+            .iter()
+            .filter(|incident| {
+                incident
+                    .recovery_timed_out
+                    .is_some_and(|timed_out| timed_out)
+                    || incident
+                        .recovery_exit_code
+                        .as_deref()
+                        .is_some_and(|code| code != "0")
+            })
+            .count();
+        let recovery_seconds: Vec<i64> = self
+            .incidents
+            .iter()
+            .filter_map(|incident| seconds_between(incident.outage_at, incident.recovered_at?))
+            .collect();
+        let outage_interval_seconds: Vec<i64> = self
+            .incidents
+            .windows(2)
+            .filter_map(|window| seconds_between(window[0].outage_at, window[1].outage_at))
+            .collect();
+
+        WatchStatsReport {
+            watch,
+            confirmed_outages,
+            recovered,
+            unrecovered,
+            recovery_attempts,
+            recovery_command_failures,
+            recovery_success_rate: if confirmed_outages == 0 {
+                None
+            } else {
+                Some(recovered as f64 / confirmed_outages as f64)
+            },
+            average_recovery_seconds: average_seconds(&recovery_seconds),
+            min_recovery_seconds: recovery_seconds.iter().min().copied(),
+            max_recovery_seconds: recovery_seconds.iter().max().copied(),
+            average_seconds_between_outages: average_seconds(&outage_interval_seconds),
+            min_seconds_between_outages: outage_interval_seconds.iter().min().copied(),
+            max_seconds_between_outages: outage_interval_seconds.iter().max().copied(),
+            last_outage: self
+                .incidents
+                .last()
+                .map(|incident| format_timestamp(incident.outage_at)),
+            last_recovery: self
+                .incidents
+                .iter()
+                .rev()
+                .find_map(|incident| incident.recovered_at.map(format_timestamp)),
+            last_known_state: self.last_known_state.clone(),
+        }
+    }
+}
+
+fn parse_log_event(line: &str) -> Option<LogEvent> {
+    let rest = line.strip_prefix('[')?;
+    let (timestamp, rest) = rest.split_once("] ")?;
+    let timestamp = OffsetDateTime::parse(timestamp, &Rfc3339).ok()?;
+    let (event, rest) = rest.split_once(": ")?;
+
+    let mut fields = HashMap::new();
+    for token in rest.split_whitespace() {
+        let Some((key, value)) = token.split_once('=') else {
+            continue;
+        };
+        fields.insert(key.to_string(), value.to_string());
+    }
+
+    Some(LogEvent {
+        timestamp,
+        event: event.to_string(),
+        watch: fields.get("watch")?.clone(),
+        fields,
+    })
+}
+
+fn seconds_between(start: OffsetDateTime, end: OffsetDateTime) -> Option<i64> {
+    let seconds = (end - start).whole_seconds();
+    (seconds >= 0).then_some(seconds)
+}
+
+fn average_seconds(values: &[i64]) -> Option<i64> {
+    if values.is_empty() {
+        None
+    } else {
+        Some(values.iter().sum::<i64>() / values.len() as i64)
+    }
+}
+
+fn format_timestamp(timestamp: OffsetDateTime) -> String {
+    timestamp
+        .format(&Rfc3339)
+        .expect("RFC3339 formatting should not fail")
+}
+
+fn write_stats_report<W: Write>(stdout: &mut W, report: &StatsReport) -> Result<()> {
+    writeln!(stdout, "Watchdog stats")?;
+    writeln!(stdout)?;
+    writeln!(stdout, "Log: {}", report.log_path)?;
+    match &report.watch_filter {
+        Some(watch) => writeln!(stdout, "Watch filter: {watch}")?,
+        None => writeln!(stdout, "Watch filter: all")?,
+    }
+    writeln!(stdout)?;
+    writeln!(stdout, "All watches:")?;
+    writeln!(
+        stdout,
+        "  confirmed outages: {}",
+        report.total.confirmed_outages
+    )?;
+    writeln!(stdout, "  recovered: {}", report.total.recovered)?;
+    writeln!(stdout, "  unrecovered: {}", report.total.unrecovered)?;
+    writeln!(
+        stdout,
+        "  recovery attempts: {}",
+        report.total.recovery_attempts
+    )?;
+    writeln!(
+        stdout,
+        "  recovery command failures: {}",
+        report.total.recovery_command_failures
+    )?;
+
+    if report.watches.is_empty() {
+        writeln!(stdout)?;
+        writeln!(stdout, "No matching watchdog events found.")?;
+        return Ok(());
+    }
+
+    for watch in &report.watches {
+        writeln!(stdout)?;
+        writeln!(stdout, "{}:", watch.watch)?;
+        writeln!(stdout, "  confirmed outages: {}", watch.confirmed_outages)?;
+        writeln!(stdout, "  recovered: {}", watch.recovered)?;
+        writeln!(stdout, "  unrecovered: {}", watch.unrecovered)?;
+        writeln!(stdout, "  recovery attempts: {}", watch.recovery_attempts)?;
+        writeln!(
+            stdout,
+            "  recovery command failures: {}",
+            watch.recovery_command_failures
+        )?;
+        writeln!(
+            stdout,
+            "  recovery success rate: {}",
+            format_rate(watch.recovery_success_rate)
+        )?;
+        writeln!(
+            stdout,
+            "  average recovery time: {}",
+            format_optional_duration(watch.average_recovery_seconds)
+        )?;
+        writeln!(
+            stdout,
+            "  min recovery time: {}",
+            format_optional_duration(watch.min_recovery_seconds)
+        )?;
+        writeln!(
+            stdout,
+            "  max recovery time: {}",
+            format_optional_duration(watch.max_recovery_seconds)
+        )?;
+        writeln!(
+            stdout,
+            "  average time between outages: {}",
+            format_optional_duration(watch.average_seconds_between_outages)
+        )?;
+        writeln!(
+            stdout,
+            "  min time between outages: {}",
+            format_optional_duration(watch.min_seconds_between_outages)
+        )?;
+        writeln!(
+            stdout,
+            "  max time between outages: {}",
+            format_optional_duration(watch.max_seconds_between_outages)
+        )?;
+        writeln!(
+            stdout,
+            "  last outage: {}",
+            watch.last_outage.as_deref().unwrap_or("n/a")
+        )?;
+        writeln!(
+            stdout,
+            "  last recovery: {}",
+            watch.last_recovery.as_deref().unwrap_or("n/a")
+        )?;
+        writeln!(
+            stdout,
+            "  last known state: {}",
+            watch.last_known_state.as_deref().unwrap_or("n/a")
+        )?;
+    }
+
+    Ok(())
+}
+
+fn format_rate(rate: Option<f64>) -> String {
+    rate.map_or_else(|| "n/a".to_string(), |rate| format!("{:.0}%", rate * 100.0))
+}
+
+fn format_optional_duration(seconds: Option<i64>) -> String {
+    seconds.map_or_else(|| "n/a".to_string(), format_duration)
+}
+
+fn format_duration(seconds: i64) -> String {
+    let days = seconds / 86_400;
+    let hours = seconds % 86_400 / 3_600;
+    let minutes = seconds % 3_600 / 60;
+    let seconds = seconds % 60;
+
+    if days > 0 {
+        format!("{days}d {hours}h {minutes}m")
+    } else if hours > 0 {
+        format!("{hours}h {minutes}m")
+    } else if minutes > 0 {
+        format!("{minutes}m {seconds}s")
+    } else {
+        format!("{seconds}s")
+    }
+}
+
 fn init_config<W: Write>(path: &Path, force: bool, stdout: &mut W) -> Result<()> {
     if path.exists() && !force {
         bail!(
@@ -758,5 +1175,65 @@ mod tests {
             expanded,
             PathBuf::from(home).join(".local/state/example.log")
         );
+    }
+
+    #[test]
+    fn parse_log_event_reads_watch_event_and_fields() {
+        let event = parse_log_event(
+            "[2026-05-10T06:37:54.174671Z] check.confirm_result: watch=mempool state=unhealthy",
+        )
+        .expect("parsed event");
+
+        assert_eq!(event.event, "check.confirm_result");
+        assert_eq!(event.watch, "mempool");
+        assert_eq!(
+            event.fields.get("state").map(String::as_str),
+            Some("unhealthy")
+        );
+    }
+
+    #[test]
+    fn stats_count_confirmed_outages_and_recoveries_by_watch() {
+        let mut builder = WatchStatsBuilder::default();
+        for line in [
+            "[2026-05-10T06:37:20.925254Z] check.result: watch=mempool state=unhealthy",
+            "[2026-05-10T06:37:54.174671Z] check.confirm_result: watch=mempool state=unhealthy",
+            "[2026-05-10T06:37:54.175791Z] recovery.start: watch=mempool",
+            "[2026-05-10T06:39:16.915443Z] recovery.done: watch=mempool exit_code=0 timed_out=false",
+            "[2026-05-10T06:39:17.826971Z] recovery.post_check: watch=mempool state=healthy",
+            "[2026-05-10T07:37:54.174671Z] check.confirm_result: watch=mempool state=unhealthy",
+        ] {
+            builder.apply(parse_log_event(line).expect("parsed event"));
+        }
+
+        let report = builder.finish("mempool".to_string());
+
+        assert_eq!(report.confirmed_outages, 2);
+        assert_eq!(report.recovered, 1);
+        assert_eq!(report.unrecovered, 1);
+        assert_eq!(report.recovery_attempts, 1);
+        assert_eq!(report.recovery_command_failures, 0);
+        assert_eq!(report.average_recovery_seconds, Some(83));
+        assert_eq!(report.average_seconds_between_outages, Some(3600));
+        assert_eq!(report.last_known_state.as_deref(), Some("unhealthy"));
+    }
+
+    #[test]
+    fn stats_marks_failed_recovery_command() {
+        let mut builder = WatchStatsBuilder::default();
+        for line in [
+            "[2026-05-10T06:37:54Z] check.confirm_result: watch=stratum state=unhealthy",
+            "[2026-05-10T06:37:55Z] recovery.start: watch=stratum",
+            "[2026-05-10T06:38:55Z] recovery.done: watch=stratum exit_code=1 timed_out=false",
+        ] {
+            builder.apply(parse_log_event(line).expect("parsed event"));
+        }
+
+        let report = builder.finish("stratum".to_string());
+
+        assert_eq!(report.confirmed_outages, 1);
+        assert_eq!(report.recovered, 0);
+        assert_eq!(report.unrecovered, 1);
+        assert_eq!(report.recovery_command_failures, 1);
     }
 }

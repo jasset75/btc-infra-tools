@@ -74,6 +74,20 @@ Run continuously under `launchd`:
 belter-watchdog run --config ~/.config/belter/watchdog.toml
 ```
 
+Summarize confirmed outages and recoveries from the watchdog event log:
+
+```bash
+belter-watchdog stats
+belter-watchdog stats --watch mempool
+belter-watchdog stats --json
+```
+
+By default `stats` reads `$HOME/.local/state/belter-watchdog/logs/watchdog.out.log`.
+Use `--log <path>` to read a different log file. A confirmed outage is counted from
+`check.confirm_result state=unhealthy`; recovery is counted only after
+`recovery.post_check state=healthy`. The command exits non-zero when the log file
+cannot be read.
+
 ## Operator Setup (macOS, repo-local mise)
 
 Recommended host layout for node operations:
