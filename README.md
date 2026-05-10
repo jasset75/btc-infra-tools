@@ -83,10 +83,21 @@ belter-watchdog stats --json
 ```
 
 By default `stats` reads `$HOME/.local/state/belter-watchdog/logs/watchdog.out.log`.
-Use `--log <path>` to read a different log file. A confirmed outage is counted from
+Use `--log <path>` to read a different log file. The report includes the first and
+last parseable event timestamps in the log. A confirmed outage is counted from
 `check.confirm_result state=unhealthy`; recovery is counted only after
 `recovery.post_check state=healthy`. The command exits non-zero when the log file
 cannot be read.
+
+Clear the default watchdog event log after recording the current stats elsewhere:
+
+```bash
+belter-watchdog clear-log
+belter-watchdog clear-log --log ~/.local/state/belter-watchdog/logs/watchdog.out.log
+```
+
+`clear-log` truncates the selected log file, creates its parent directory when
+needed, and exits non-zero if the file cannot be opened for writing.
 
 ## Operator Setup (macOS, repo-local mise)
 

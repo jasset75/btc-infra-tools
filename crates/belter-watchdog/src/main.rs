@@ -50,6 +50,10 @@ enum WatchdogCommand {
         #[arg(long)]
         json: bool,
     },
+    ClearLog {
+        #[arg(long, default_value = DEFAULT_STDOUT_LOG_PATH)]
+        log: String,
+    },
 }
 
 #[derive(Debug, Deserialize)]
@@ -157,6 +161,7 @@ fn run<W: Write>(cli: &Cli, clock: &dyn Clock, stdout: &mut W) -> Result<()> {
             }
             Ok(())
         }
+        WatchdogCommand::ClearLog { log } => clear_log(log, stdout),
     }
 }
 
@@ -610,6 +615,8 @@ struct WatchStatsBuilder {
 #[derive(Debug, Serialize)]
 struct StatsReport {
     log_path: String,
+    log_started_at: Option<String>,
+    log_ended_at: Option<String>,
     watch_filter: Option<String>,
     total: StatsTotals,
     watches: Vec<WatchStatsReport>,
@@ -650,12 +657,19 @@ fn build_stats_report(log_path: &str, watch_filter: Option<&str>) -> Result<Stat
         .with_context(|| format!("failed to open watchdog log {}", expanded.display()))?;
     let reader = BufReader::new(file);
     let mut builders: BTreeMap<String, WatchStatsBuilder> = BTreeMap::new();
+    let mut log_started_at: Option<OffsetDateTime> = None;
+    let mut log_ended_at: Option<OffsetDateTime> = None;
 
     for line in reader.lines() {
         let line = line?;
         let Some(event) = parse_log_event(&line) else {
             continue;
         };
+        log_started_at = Some(log_started_at.map_or(event.timestamp, |started_at| {
+            started_at.min(event.timestamp)
+        }));
+        log_ended_at =
+            Some(log_ended_at.map_or(event.timestamp, |ended_at| ended_at.max(event.timestamp)));
         if watch_filter.is_some_and(|watch| event.watch != watch) {
             continue;
         }
@@ -679,6 +693,8 @@ fn build_stats_report(log_path: &str, watch_filter: Option<&str>) -> Result<Stat
 
     Ok(StatsReport {
         log_path: expanded.display().to_string(),
+        log_started_at: log_started_at.map(format_timestamp),
+        log_ended_at: log_ended_at.map(format_timestamp),
         watch_filter: watch_filter.map(str::to_string),
         total,
         watches,
@@ -856,6 +872,16 @@ fn write_stats_report<W: Write>(stdout: &mut W, report: &StatsReport) -> Result<
     writeln!(stdout, "Watchdog stats")?;
     writeln!(stdout)?;
     writeln!(stdout, "Log: {}", report.log_path)?;
+    writeln!(
+        stdout,
+        "Log started at: {}",
+        report.log_started_at.as_deref().unwrap_or("n/a")
+    )?;
+    writeln!(
+        stdout,
+        "Log ended at: {}",
+        report.log_ended_at.as_deref().unwrap_or("n/a")
+    )?;
     match &report.watch_filter {
         Some(watch) => writeln!(stdout, "Watch filter: {watch}")?,
         None => writeln!(stdout, "Watch filter: all")?,
@@ -976,6 +1002,25 @@ fn format_duration(seconds: i64) -> String {
     } else {
         format!("{seconds}s")
     }
+}
+
+fn clear_log<W: Write>(log_path: &str, stdout: &mut W) -> Result<()> {
+    let expanded = expand_home(log_path)?;
+    if let Some(parent) = expanded.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create log directory {}", parent.display()))?;
+    }
+
+    OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(&expanded)
+        .with_context(|| format!("failed to clear watchdog log {}", expanded.display()))?;
+    writeln!(stdout, "cleared watchdog log at {}", expanded.display())?;
+    Ok(())
 }
 
 fn init_config<W: Write>(path: &Path, force: bool, stdout: &mut W) -> Result<()> {
@@ -1235,5 +1280,52 @@ mod tests {
         assert_eq!(report.recovered, 0);
         assert_eq!(report.unrecovered, 1);
         assert_eq!(report.recovery_command_failures, 1);
+    }
+
+    #[test]
+    fn stats_report_includes_log_window() {
+        let path = unique_temp_path("watchdog-stats-window.log");
+        fs::write(
+            &path,
+            [
+                "[2026-05-10T06:37:54Z] check.confirm_result: watch=mempool state=unhealthy",
+                "[2026-05-10T06:39:17Z] recovery.post_check: watch=mempool state=healthy",
+            ]
+            .join("\n"),
+        )
+        .expect("write temp log");
+
+        let report = build_stats_report(path.to_str().expect("utf8 path"), None)
+            .expect("stats report should build");
+
+        assert_eq!(
+            report.log_started_at.as_deref(),
+            Some("2026-05-10T06:37:54Z")
+        );
+        assert_eq!(report.log_ended_at.as_deref(), Some("2026-05-10T06:39:17Z"));
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn clear_log_truncates_existing_log() {
+        let path = unique_temp_path("watchdog-clear.log");
+        fs::write(&path, "existing log line\n").expect("write temp log");
+
+        let mut output = Vec::new();
+        clear_log(path.to_str().expect("utf8 path"), &mut output).expect("clear log");
+
+        assert_eq!(fs::read_to_string(&path).expect("read temp log"), "");
+        assert!(
+            String::from_utf8(output)
+                .expect("utf8 output")
+                .contains("cleared watchdog log at")
+        );
+
+        let _ = fs::remove_file(path);
+    }
+
+    fn unique_temp_path(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("{}-{}", std::process::id(), name))
     }
 }
