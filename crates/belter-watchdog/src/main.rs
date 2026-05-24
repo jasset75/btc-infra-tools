@@ -407,14 +407,9 @@ fn run_watch_cycle(
         ),
     )?;
 
-    if recovery.timed_out || recovery.code != Some(0) {
-        bail!(
-            "recovery for `{}` failed: exit_code={} timed_out={} stderr={}",
-            watch.config.name,
-            display_code(recovery.code),
-            recovery.timed_out,
-            recovery.stderr.trim()
-        );
+    let recovery_failed = is_recovery_failure(&recovery);
+    if recovery_failed {
+        log_recovery_command_failure(clock, logger, watch, &recovery)?;
     }
 
     let post = run_diagnose(watch)?;
@@ -426,6 +421,15 @@ fn run_watch_cycle(
         health_label(post),
     )?;
     if post != HealthState::Healthy {
+        if recovery_failed {
+            bail!(
+                "recovery for `{}` failed and post-check is still unhealthy: exit_code={} timed_out={} stderr={}",
+                watch.config.name,
+                display_code(recovery.code),
+                recovery.timed_out,
+                recovery.stderr.trim()
+            );
+        }
         bail!(
             "watch `{}` is still unhealthy after recovery",
             watch.config.name
@@ -443,6 +447,30 @@ fn run_watch_cycle(
     }
 
     Ok(watch.interval.max(watch.cooldown))
+}
+
+fn is_recovery_failure(output: &CommandOutput) -> bool {
+    output.timed_out || output.code != Some(0)
+}
+
+fn log_recovery_command_failure(
+    clock: &dyn Clock,
+    logger: &mut Logger<'_>,
+    watch: &EffectiveWatch<'_>,
+    recovery: &CommandOutput,
+) -> Result<()> {
+    log_line(
+        clock,
+        logger,
+        &watch.config.name,
+        "recovery.command_failure",
+        &format!(
+            "exit_code={} timed_out={} stderr={}",
+            display_code(recovery.code),
+            recovery.timed_out,
+            sanitize_log_detail(recovery.stderr.trim())
+        ),
+    )
 }
 
 fn run_diagnose(watch: &EffectiveWatch<'_>) -> Result<HealthState> {
@@ -1212,6 +1240,48 @@ mod tests {
     }
 
     #[test]
+    fn watch_cycle_closes_outage_when_failed_recovery_leaves_service_healthy() {
+        let state_path = unique_temp_path("watchdog-recovery-state");
+        let _ = fs::remove_file(&state_path);
+        let mut watch = sample_watch();
+        watch.diagnose = format!(
+            "if test -f '{}'; then printf '%s' '{{\"data\":{{\"state\":\"running\"}}}}'; else printf '%s' '{{\"data\":{{\"state\":\"degraded\"}}}}'; fi",
+            state_path.display()
+        );
+        watch.recovery = format!(
+            "touch '{}'; printf '%s\\n' 'simulated recovery command failure' >&2; exit 1",
+            state_path.display()
+        );
+        let effective = EffectiveWatch {
+            config: &watch,
+            interval: Duration::from_secs(600),
+            confirm_after: Duration::ZERO,
+            cooldown: Duration::ZERO,
+            timeout: Duration::from_secs(5),
+            shell: default_shell(),
+        };
+        let clock = FixedClock::new("2026-05-08T15:00:00Z");
+        let mut output = Vec::new();
+        let mut logger = Logger {
+            stdout: Box::new(&mut output),
+            stderr: None,
+        };
+
+        let next_delay = run_watch_cycle(&effective, &clock, &mut logger)
+            .expect("healthy post-check should close outage");
+        drop(logger);
+        let logs = String::from_utf8(output).expect("utf8 logs");
+
+        assert_eq!(next_delay, Duration::from_secs(600));
+        assert!(logs.contains("recovery.done: watch=mempool exit_code=1 timed_out=false"));
+        assert!(logs.contains("recovery.command_failure: watch=mempool"));
+        assert!(logs.contains("stderr=simulated recovery command failure"));
+        assert!(logs.contains("recovery.post_check: watch=mempool state=healthy"));
+
+        let _ = fs::remove_file(state_path);
+    }
+
+    #[test]
     fn expand_home_rewrites_home_prefix() {
         let home = std::env::var("HOME").expect("HOME should be set in tests");
         let expanded = expand_home("$HOME/.local/state/example.log").expect("expanded path");
@@ -1280,6 +1350,28 @@ mod tests {
         assert_eq!(report.recovered, 0);
         assert_eq!(report.unrecovered, 1);
         assert_eq!(report.recovery_command_failures, 1);
+    }
+
+    #[test]
+    fn stats_counts_failed_recovery_command_with_healthy_post_check_as_recovered() {
+        let mut builder = WatchStatsBuilder::default();
+        for line in [
+            "[2026-05-10T06:37:54Z] check.confirm_result: watch=mempool state=unhealthy",
+            "[2026-05-10T06:37:55Z] recovery.start: watch=mempool",
+            "[2026-05-10T06:38:55Z] recovery.done: watch=mempool exit_code=1 timed_out=false",
+            "[2026-05-10T06:38:56Z] recovery.command_failure: watch=mempool exit_code=1 timed_out=false stderr=simulated failure",
+            "[2026-05-10T06:38:57Z] recovery.post_check: watch=mempool state=healthy",
+        ] {
+            builder.apply(parse_log_event(line).expect("parsed event"));
+        }
+
+        let report = builder.finish("mempool".to_string());
+
+        assert_eq!(report.confirmed_outages, 1);
+        assert_eq!(report.recovered, 1);
+        assert_eq!(report.unrecovered, 0);
+        assert_eq!(report.recovery_command_failures, 1);
+        assert_eq!(report.last_known_state.as_deref(), Some("healthy"));
     }
 
     #[test]
