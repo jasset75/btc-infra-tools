@@ -196,12 +196,13 @@ belter info pool --url http://192.0.2.10:3334/api/info
   - Loads `service.<name>` from config when `name` is provided.
   - `launchd` services: resolves `unit`, queries runtime status via `launchctl print`, and reports state in `data` (`running|stopped|unknown`) with optional `pid`.
   - `podman_compose` services: resolves `compose_file`/`compose_override`/`project`, filters container ids to containers whose Podman `State.Running` is actually `true`, and reports:
-    - `data.state = running|stopped|degraded|unknown`
+    - `data.state = running|stopped|syncing|degraded|unknown`
     - `data.running_containers` (container ids when available)
     - `data.query_error` when runtime query cannot be completed.
   - `mempool` has a stronger status contract:
-    - `running` requires running containers and `HTTP 200` from `/api/v1/backend-info`
-    - `degraded` means containers are up but readiness failed
+    - `running` requires running containers and `HTTP 200` from `/api/v1/backend-info`, `/api/v1/fees/recommended`, `/api/mempool`, and `/api/blocks/tip/height`
+    - `syncing` means containers are up, `/api/v1/backend-info` is reachable, and `/api/v1/fees/recommended` returned `503`, which indicates `mempool` backend is still catching up
+    - `degraded` means containers are up but the backend/API path failed outside the known syncing signal
     - `health_url` is included in JSON output for machine-readable consumers.
   - `podman_machine` services resolve `machine` and report `running|stopped|unknown`.
   - Unknown/unsupported managers return `state=unknown` with descriptive message.
@@ -314,15 +315,16 @@ Current implemented specialization:
   - starts `bitcoind` only if not already healthy,
   - starts `podman_runtime` only if not already healthy,
   - starts `mempool`,
-  - waits for `http://${MEMPOOL_HOST}:${MEMPOOL_PORT}/api/v1/backend-info` to return `200`,
-  - fails if readiness does not stabilize within the built-in retry loop.
+  - waits for `mempool` HTTP readiness to reach either `running` or the known `syncing` state,
+  - fails if backend/API readiness does not stabilize within the built-in retry loop.
 
 Readiness policy:
 - current implementation uses synchronous polling with exponential backoff
 - attempts: `5`
 - initial delay: `1s`
 - maximum delay: `8s`
-- readiness target for `mempool`: `/api/v1/backend-info`
+- readiness targets for `mempool`: `/api/v1/backend-info`, `/api/v1/fees/recommended`, `/api/mempool`, `/api/blocks/tip/height`
+- `/api/v1/fees/recommended = 503` is treated as `syncing`, not `degraded`
 
 Current design limits:
 - no reconciliation loop or daemon mode,

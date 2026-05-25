@@ -159,7 +159,7 @@ struct PodmanComposeStatusSnapshot {
     compose_file: String,
     compose_override: Option<String>,
     project: Option<String>,
-    state: &'static str,
+    state: RuntimeState,
     running_containers: Vec<String>,
     query_error: Option<String>,
     health_url: Option<String>,
@@ -167,7 +167,7 @@ struct PodmanComposeStatusSnapshot {
 
 struct DependentComposeIssue {
     service: String,
-    state: &'static str,
+    state: RuntimeState,
     running_containers: Vec<String>,
     query_error: Option<String>,
 }
@@ -385,6 +385,10 @@ pub(crate) fn emit_status_all<W: Write>(
         .iter()
         .filter(|item| item.data.state == "degraded")
         .count();
+    let syncing = computed
+        .iter()
+        .filter(|item| item.data.state == "syncing")
+        .count();
     let running = computed
         .iter()
         .filter(|item| item.data.state == "running")
@@ -394,10 +398,11 @@ pub(crate) fn emit_status_all<W: Write>(
         .filter(|item| item.data.state == "stopped")
         .count();
     let message = format!(
-        "status target=all ui={ui_mode:?} services={} running={} stopped={} degraded={} unknown={}",
+        "status target=all ui={ui_mode:?} services={} running={} stopped={} syncing={} degraded={} unknown={}",
         computed.len(),
         running,
         stopped,
+        syncing,
         degraded,
         unknown
     );
@@ -439,11 +444,14 @@ fn compute_status(
     }
 
     if service.manager == PODMAN_COMPOSE_MANAGER {
-        let snapshot = compute_podman_compose_status_snapshot(ctx.service_name, service, ctx.env_resolver)?;
+        let snapshot =
+            compute_podman_compose_status_snapshot(ctx.service_name, service, ctx.env_resolver)?;
 
         let message = format!(
             "status target={} ui={:?} state={}",
-            ctx.service_name, ctx.ui_mode, snapshot.state
+            ctx.service_name,
+            ctx.ui_mode,
+            runtime_state_label(snapshot.state)
         );
         let status_data = if ctx.service_name == "mempool" {
             ServiceStatusData::podman(
@@ -451,7 +459,7 @@ fn compute_status(
                 Some(snapshot.compose_file),
                 snapshot.compose_override,
                 snapshot.project,
-                snapshot.state,
+                runtime_state_label(snapshot.state),
                 snapshot.running_containers,
                 None,
             )
@@ -462,7 +470,7 @@ fn compute_status(
                 Some(snapshot.compose_file),
                 snapshot.compose_override,
                 snapshot.project,
-                snapshot.state,
+                runtime_state_label(snapshot.state),
                 snapshot.running_containers,
                 snapshot.query_error,
             )
@@ -493,14 +501,16 @@ fn compute_status(
             }
         };
 
-        let (state, query_error) = match infractl_adapters::PodmanMachineAdapter.is_running(&machine)
-        {
-            Ok(true) => derive_podman_runtime_state(
-                dependent_compose_issues(config, ctx.service_name, ctx.env_resolver),
-            ),
-            Ok(false) => ("stopped", None),
-            Err(err) => ("unknown", Some(err.to_string())),
-        };
+        let (state, query_error) =
+            match infractl_adapters::PodmanMachineAdapter.is_running(&machine) {
+                Ok(true) => derive_podman_runtime_state(dependent_compose_issues(
+                    config,
+                    ctx.service_name,
+                    ctx.env_resolver,
+                )),
+                Ok(false) => ("stopped", None),
+                Err(err) => ("unknown", Some(err.to_string())),
+            };
 
         let message = format!(
             "status target={} ui={:?} state={state}",
@@ -552,7 +562,7 @@ fn compute_podman_compose_status_snapshot(
                 compose_file: compose_file_tmpl.to_string(),
                 compose_override: None,
                 project: None,
-                state: "unknown",
+                state: RuntimeState::Unknown,
                 running_containers: Vec::new(),
                 query_error: Some(err.to_string()),
                 health_url: None,
@@ -571,7 +581,7 @@ fn compute_podman_compose_status_snapshot(
                 compose_file,
                 compose_override: None,
                 project: None,
-                state: "unknown",
+                state: RuntimeState::Unknown,
                 running_containers: Vec::new(),
                 query_error: Some(err.to_string()),
                 health_url: None,
@@ -590,7 +600,7 @@ fn compute_podman_compose_status_snapshot(
                 compose_file,
                 compose_override,
                 project: None,
-                state: "unknown",
+                state: RuntimeState::Unknown,
                 running_containers: Vec::new(),
                 query_error: Some(err.to_string()),
                 health_url: None,
@@ -606,18 +616,31 @@ fn compute_podman_compose_status_snapshot(
         ) {
             Ok(ids) => {
                 if ids.is_empty() {
-                    ("stopped", ids, None, None)
+                    (RuntimeState::Stopped, ids, None, None)
                 } else if service_name == "mempool" {
                     let url = mempool_health_url(env_resolver);
-                    match probe_http_200(&url) {
-                        Ok(()) => ("running", ids, None, Some(url)),
-                        Err(err) => ("degraded", ids, Some(err.to_string()), Some(url)),
+                    match probe_mempool_status(env_resolver) {
+                        MempoolProbeStatus::Ready => (RuntimeState::Running, ids, None, Some(url)),
+                        MempoolProbeStatus::Syncing(detail) => {
+                            (RuntimeState::Syncing, ids, Some(detail), Some(url))
+                        }
+                        MempoolProbeStatus::Degraded(err) => (
+                            RuntimeState::Degraded,
+                            ids,
+                            Some(err.to_string()),
+                            Some(url),
+                        ),
                     }
                 } else {
-                    ("running", ids, None, None)
+                    (RuntimeState::Running, ids, None, None)
                 }
             }
-            Err(err) => ("unknown", Vec::new(), Some(err.to_string()), None),
+            Err(err) => (
+                RuntimeState::Unknown,
+                Vec::new(),
+                Some(err.to_string()),
+                None,
+            ),
         };
 
     Ok(PodmanComposeStatusSnapshot {
@@ -651,8 +674,9 @@ fn dependent_compose_issues(
                 .any(|dependency| dependency == runtime_service_name)
         })
         .filter_map(|(name, service)| {
-            let snapshot = compute_podman_compose_status_snapshot(name, service, env_resolver).ok()?;
-            if snapshot.state == "degraded" && !snapshot.running_containers.is_empty() {
+            let snapshot =
+                compute_podman_compose_status_snapshot(name, service, env_resolver).ok()?;
+            if snapshot.state == RuntimeState::Degraded && !snapshot.running_containers.is_empty() {
                 Some(DependentComposeIssue {
                     service: name.clone(),
                     state: snapshot.state,
@@ -683,7 +707,7 @@ fn derive_podman_runtime_state(
         Some(format!(
             "dependent service `{}` is {} with {} running container(s); podman port forwarding may be unhealthy: {}",
             issue.service,
-            issue.state,
+            runtime_state_label(issue.state),
             issue.running_containers.len(),
             detail
         )),
@@ -691,16 +715,101 @@ fn derive_podman_runtime_state(
 }
 
 fn mempool_health_url(env_resolver: &dyn EnvResolver) -> String {
+    mempool_probe_urls(env_resolver)
+        .into_iter()
+        .next()
+        .expect("mempool probe list should not be empty")
+}
+
+fn mempool_probe_urls(env_resolver: &dyn EnvResolver) -> Vec<String> {
+    [
+        "/api/v1/backend-info",
+        "/api/v1/fees/recommended",
+        "/api/mempool",
+        "/api/blocks/tip/height",
+    ]
+    .into_iter()
+    .map(|path| mempool_url(env_resolver, path))
+    .collect()
+}
+
+fn mempool_url(env_resolver: &dyn EnvResolver, path: &str) -> String {
     let host = env_resolver
         .resolve("MEMPOOL_HOST")
         .unwrap_or_else(|| "127.0.0.1".to_string());
     let port = env_resolver
         .resolve("MEMPOOL_PORT")
         .unwrap_or_else(|| "8080".to_string());
-    format!("http://{host}:{port}/api/v1/backend-info")
+    format!("http://{host}:{port}{path}")
+}
+
+enum MempoolProbeStatus {
+    Ready,
+    Syncing(String),
+    Degraded(anyhow::Error),
+}
+
+fn probe_mempool_status(env_resolver: &dyn EnvResolver) -> MempoolProbeStatus {
+    let backend_info_url = mempool_url(env_resolver, "/api/v1/backend-info");
+    if let Err(err) = probe_http_200(&backend_info_url) {
+        return MempoolProbeStatus::Degraded(
+            err.context(format!("mempool probe failed for {backend_info_url}")),
+        );
+    }
+
+    let fees_url = mempool_url(env_resolver, "/api/v1/fees/recommended");
+    match probe_http_status(&fees_url) {
+        Ok(status) => {
+            if let Some(status) = classify_mempool_fees_status(&fees_url, &status) {
+                return status;
+            }
+        }
+        Err(err) => {
+            return MempoolProbeStatus::Degraded(
+                err.context(format!("mempool probe failed for {fees_url}")),
+            );
+        }
+    }
+
+    for path in ["/api/mempool", "/api/blocks/tip/height"] {
+        let url = mempool_url(env_resolver, path);
+        if let Err(err) = probe_http_200(&url) {
+            return MempoolProbeStatus::Degraded(
+                err.context(format!("mempool probe failed for {url}")),
+            );
+        }
+    }
+
+    MempoolProbeStatus::Ready
+}
+
+fn classify_mempool_fees_status(fees_url: &str, status: &HttpStatus) -> Option<MempoolProbeStatus> {
+    match status.status_code {
+        200 => None,
+        503 => Some(MempoolProbeStatus::Syncing(format!(
+            "mempool backend is syncing: {fees_url} returned {}",
+            status.status_line
+        ))),
+        _ => Some(MempoolProbeStatus::Degraded(anyhow::anyhow!(
+            "mempool probe failed for {fees_url}: unexpected HTTP status from {}: {}",
+            status.authority,
+            status.status_line
+        ))),
+    }
 }
 
 fn probe_http_200(url: &str) -> Result<()> {
+    let status = probe_http_status(url)?;
+    validate_http_status(&status.authority, &status.status_line, status.status_code)
+}
+
+struct HttpStatus {
+    authority: String,
+    status_line: String,
+    status_code: u16,
+}
+
+fn probe_http_status(url: &str) -> Result<HttpStatus> {
     let endpoint = parse_http_url(url)?;
     let mut stream = TcpStream::connect((&endpoint.host[..], endpoint.port))
         .with_context(|| format!("failed to connect to {}", endpoint.authority()))?;
@@ -725,16 +834,38 @@ fn probe_http_200(url: &str) -> Result<()> {
     reader
         .read_line(&mut status_line)
         .context("failed to read HTTP response")?;
-    validate_http_status_line(&endpoint.authority(), &status_line)
+    let authority = endpoint.authority();
+    let status_line = status_line.trim_end_matches(['\r', '\n']).to_string();
+    let status_code = parse_http_status_code(&authority, &status_line)?;
+    Ok(HttpStatus {
+        authority,
+        status_line,
+        status_code,
+    })
 }
 
+#[cfg(test)]
 fn validate_http_status_line(authority: &str, status_line: &str) -> Result<()> {
     let status_line = status_line.trim_end_matches(['\r', '\n']);
-    if status_line.contains(" 200 ") {
+    let status_code = parse_http_status_code(authority, status_line)?;
+    validate_http_status(authority, status_line, status_code)
+}
+
+fn validate_http_status(authority: &str, status_line: &str, status_code: u16) -> Result<()> {
+    if status_code == 200 {
         return Ok(());
     }
 
     bail!("unexpected HTTP status from {authority}: {status_line}")
+}
+
+fn parse_http_status_code(authority: &str, status_line: &str) -> Result<u16> {
+    status_line
+        .split_whitespace()
+        .nth(1)
+        .ok_or_else(|| anyhow::anyhow!("invalid HTTP status from {authority}: {status_line}"))?
+        .parse::<u16>()
+        .with_context(|| format!("invalid HTTP status code from {authority}: {status_line}"))
 }
 
 struct HttpEndpoint {
@@ -968,7 +1099,7 @@ pub(crate) fn execute_service_bring_up_from_config(
         events.push(output_event(
             SeverityLevel::Info,
             "bring_up.ready",
-            "mempool backend responded with HTTP 200",
+            "mempool HTTP readiness reached",
             json!({ "health_url": mempool_health_url(env_resolver) }),
         ));
     }
@@ -991,11 +1122,8 @@ fn recover_mempool_readiness_if_needed(
     match wait_for_mempool_readiness(recovery.env_resolver) {
         Ok(()) => Ok(()),
         Err(err) => {
-            let maybe_err = retry_mempool_service_after_failed_readiness(
-                recovery,
-                initial_runtime_state,
-                err,
-            )?;
+            let maybe_err =
+                retry_mempool_service_after_failed_readiness(recovery, initial_runtime_state, err)?;
             let Some(err) = maybe_err else {
                 return Ok(());
             };
@@ -1059,10 +1187,12 @@ fn retry_mempool_runtime_after_failed_readiness(
         .config
         .service_by_name(&runtime_service_name)
         .ok_or_else(|| anyhow::anyhow!("service `{runtime_service_name}` not found in config"))?;
-    let runtime_state =
-        compute_runtime_state(&runtime_service_name, runtime_service, recovery.env_resolver)?;
-    let Some(runtime_action) =
-        bring_up_runtime_retry_action_after_failed_readiness(runtime_state)
+    let runtime_state = compute_runtime_state(
+        &runtime_service_name,
+        runtime_service,
+        recovery.env_resolver,
+    )?;
+    let Some(runtime_action) = bring_up_runtime_retry_action_after_failed_readiness(runtime_state)
     else {
         return Err(previous_error);
     };
@@ -1268,6 +1398,7 @@ struct MempoolBringUpRecoveryCtx<'a> {
 enum RuntimeState {
     Running,
     Stopped,
+    Syncing,
     Degraded,
     Unknown,
 }
@@ -1325,11 +1456,11 @@ fn compute_runtime_state(
             ) {
                 Ok(ids) if ids.is_empty() => Ok(RuntimeState::Stopped),
                 Ok(_) if service_name == "mempool" => {
-                    let url = mempool_health_url(env_resolver);
-                    match probe_http_200(&url) {
-                        Ok(()) => Ok(RuntimeState::Running),
-                        Err(_) => Ok(RuntimeState::Degraded),
-                    }
+                    Ok(match probe_mempool_status(env_resolver) {
+                        MempoolProbeStatus::Ready => RuntimeState::Running,
+                        MempoolProbeStatus::Syncing(_) => RuntimeState::Syncing,
+                        MempoolProbeStatus::Degraded(_) => RuntimeState::Degraded,
+                    })
                 }
                 Ok(_) => Ok(RuntimeState::Running),
                 Err(_) => Ok(RuntimeState::Unknown),
@@ -1343,7 +1474,7 @@ fn bring_up_action(service_name: &str, state: RuntimeState) -> Option<ServiceAct
     match state {
         RuntimeState::Stopped | RuntimeState::Unknown => Some(ServiceAction::Start),
         RuntimeState::Degraded if service_name == "mempool" => Some(ServiceAction::Restart),
-        RuntimeState::Running | RuntimeState::Degraded => None,
+        RuntimeState::Running | RuntimeState::Syncing | RuntimeState::Degraded => None,
     }
 }
 
@@ -1377,7 +1508,10 @@ fn bring_up_runtime_retry_action_after_failed_readiness(
 ) -> Option<ServiceAction> {
     match runtime_state {
         RuntimeState::Degraded => Some(ServiceAction::Restart),
-        RuntimeState::Running | RuntimeState::Stopped | RuntimeState::Unknown => None,
+        RuntimeState::Running
+        | RuntimeState::Stopped
+        | RuntimeState::Syncing
+        | RuntimeState::Unknown => None,
     }
 }
 
@@ -1385,6 +1519,7 @@ fn runtime_state_label(state: RuntimeState) -> &'static str {
     match state {
         RuntimeState::Running => "running",
         RuntimeState::Stopped => "stopped",
+        RuntimeState::Syncing => "syncing",
         RuntimeState::Degraded => "degraded",
         RuntimeState::Unknown => "unknown",
     }
@@ -1395,12 +1530,12 @@ fn wait_for_mempool_readiness(env_resolver: &dyn EnvResolver) -> Result<()> {
     let mut delay = Duration::from_secs(1);
 
     for attempt in 1..=5 {
-        match probe_http_200(&url) {
-            Ok(()) => return Ok(()),
-            Err(err) if attempt == 5 => {
+        match probe_mempool_status(env_resolver) {
+            MempoolProbeStatus::Ready | MempoolProbeStatus::Syncing(_) => return Ok(()),
+            MempoolProbeStatus::Degraded(err) if attempt == 5 => {
                 bail!("mempool did not become ready at {url}: {err}");
             }
-            Err(_) => {
+            MempoolProbeStatus::Degraded(_) => {
                 thread::sleep(delay);
                 delay = std::cmp::min(delay * 2, Duration::from_secs(8));
             }
@@ -1531,12 +1666,14 @@ fn action_label(action: ServiceAction) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        DependentComposeIssue, RuntimeState, bring_up_action,
+        DependentComposeIssue, HttpStatus, MempoolProbeStatus, RuntimeState, bring_up_action,
         bring_up_retry_action_after_failed_readiness, bring_up_runtime_recovery_service,
-        bring_up_runtime_retry_action_after_failed_readiness, derive_podman_runtime_state,
+        bring_up_runtime_retry_action_after_failed_readiness, classify_mempool_fees_status,
+        derive_podman_runtime_state, mempool_health_url, mempool_probe_urls, runtime_state_label,
         validate_http_status_line,
     };
     use infractl_core::config::{BelterConfig, ServiceConfig};
+    use infractl_core::env::FixedEnvResolver;
     use infractl_core::usecase::ServiceAction;
     use std::collections::HashMap;
 
@@ -1594,21 +1731,25 @@ mod tests {
     }
 
     #[test]
+    fn bring_up_action_skips_syncing_mempool() {
+        assert!(bring_up_action("mempool", RuntimeState::Syncing).is_none());
+        assert_eq!(runtime_state_label(RuntimeState::Syncing), "syncing");
+    }
+
+    #[test]
     fn bring_up_retry_action_restarts_unknown_mempool_after_failed_readiness() {
         assert!(matches!(
             bring_up_retry_action_after_failed_readiness("mempool", RuntimeState::Unknown),
             Some(ServiceAction::Restart)
         ));
-        assert!(bring_up_retry_action_after_failed_readiness(
-            "mempool",
-            RuntimeState::Stopped
-        )
-        .is_none());
-        assert!(bring_up_retry_action_after_failed_readiness(
-            "bitcoind",
-            RuntimeState::Unknown
-        )
-        .is_none());
+        assert!(
+            bring_up_retry_action_after_failed_readiness("mempool", RuntimeState::Stopped)
+                .is_none()
+        );
+        assert!(
+            bring_up_retry_action_after_failed_readiness("bitcoind", RuntimeState::Unknown)
+                .is_none()
+        );
     }
 
     #[test]
@@ -1636,9 +1777,11 @@ mod tests {
     fn derive_podman_runtime_state_degrades_when_dependent_compose_service_is_degraded() {
         let (state, query_error) = derive_podman_runtime_state(vec![DependentComposeIssue {
             service: "mempool".to_string(),
-            state: "degraded",
+            state: RuntimeState::Degraded,
             running_containers: vec!["abc".to_string(), "def".to_string()],
-            query_error: Some("unexpected HTTP status from 127.0.0.1:8080: HTTP/1.1 502 Bad Gateway".to_string()),
+            query_error: Some(
+                "unexpected HTTP status from 127.0.0.1:8080: HTTP/1.1 502 Bad Gateway".to_string(),
+            ),
         }]);
 
         assert_eq!(state, "degraded");
@@ -1650,11 +1793,8 @@ mod tests {
 
     #[test]
     fn validate_http_status_line_reports_non_200_status() {
-        let err = validate_http_status_line(
-            "127.0.0.1:8080",
-            "HTTP/1.1 502 Bad Gateway\r\n",
-        )
-        .expect_err("validation should fail for non-200 response");
+        let err = validate_http_status_line("127.0.0.1:8080", "HTTP/1.1 502 Bad Gateway\r\n")
+            .expect_err("validation should fail for non-200 response");
         assert!(
             err.to_string()
                 .contains("unexpected HTTP status from 127.0.0.1"),
@@ -1670,5 +1810,65 @@ mod tests {
     fn validate_http_status_line_accepts_200_status() {
         validate_http_status_line("127.0.0.1:8080", "HTTP/1.1 200 OK\r\n")
             .expect("validation should succeed for 200 response");
+    }
+
+    #[test]
+    fn classify_mempool_fees_503_as_syncing() {
+        let status = HttpStatus {
+            authority: "127.0.0.1:8080".to_string(),
+            status_line: "HTTP/1.1 503 Service Unavailable".to_string(),
+            status_code: 503,
+        };
+
+        match classify_mempool_fees_status("http://127.0.0.1:8080/api/v1/fees/recommended", &status)
+        {
+            Some(MempoolProbeStatus::Syncing(detail)) => {
+                assert!(detail.contains("mempool backend is syncing"));
+                assert!(detail.contains("503 Service Unavailable"));
+            }
+            _ => panic!("503 fees response should be classified as syncing"),
+        }
+    }
+
+    #[test]
+    fn classify_mempool_fees_502_as_degraded() {
+        let status = HttpStatus {
+            authority: "127.0.0.1:8080".to_string(),
+            status_line: "HTTP/1.1 502 Bad Gateway".to_string(),
+            status_code: 502,
+        };
+
+        assert!(matches!(
+            classify_mempool_fees_status("http://127.0.0.1:8080/api/v1/fees/recommended", &status,),
+            Some(MempoolProbeStatus::Degraded(_))
+        ));
+    }
+
+    #[test]
+    fn mempool_probe_urls_cover_frontend_data_dependencies() {
+        let mut values = HashMap::new();
+        values.insert("MEMPOOL_HOST".to_string(), "mempool.local".to_string());
+        values.insert("MEMPOOL_PORT".to_string(), "8081".to_string());
+        let resolver = FixedEnvResolver::new(values);
+
+        assert_eq!(
+            mempool_probe_urls(&resolver),
+            vec![
+                "http://mempool.local:8081/api/v1/backend-info",
+                "http://mempool.local:8081/api/v1/fees/recommended",
+                "http://mempool.local:8081/api/mempool",
+                "http://mempool.local:8081/api/blocks/tip/height",
+            ]
+        );
+    }
+
+    #[test]
+    fn mempool_health_url_remains_primary_backend_info_probe() {
+        let resolver = FixedEnvResolver::new(HashMap::new());
+
+        assert_eq!(
+            mempool_health_url(&resolver),
+            "http://127.0.0.1:8080/api/v1/backend-info"
+        );
     }
 }
