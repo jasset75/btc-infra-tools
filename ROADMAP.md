@@ -25,6 +25,11 @@ Completed:
 - [x] Add integration tests for aggregated service status
 - [x] Add a `just` workflow to install the latest stable tagged release on operator nodes
 - [x] Add `belter-watchdog` for command-based service recovery loops
+- [x] Add `mempool` sync-aware status classification:
+  - `running` when backend, fees, mempool, and tip-height endpoints are healthy
+  - `syncing` when backend is reachable and `/api/v1/fees/recommended` returns `503`
+  - `degraded` for transport failures, `502`, or non-sync endpoint failures
+- [x] Teach `service bring-up mempool` not to restart during known `syncing` windows
 
 Why this release:
 - this closes the biggest UX gap after `bring-up` by making the service control plane feel complete enough for daily use.
