@@ -17,6 +17,8 @@ const DEFAULT_INTERVAL_SECONDS: u64 = 600;
 const DEFAULT_CONFIRM_AFTER_SECONDS: u64 = 30;
 const DEFAULT_COOLDOWN_SECONDS: u64 = 600;
 const DEFAULT_TIMEOUT_SECONDS: u64 = 120;
+const DEFAULT_RECOVERY_STABILIZATION_SECONDS: u64 = 120;
+const DEFAULT_RECOVERY_POLL_SECONDS: u64 = 5;
 const DEFAULT_STDOUT_LOG_PATH: &str = "$HOME/.local/state/belter-watchdog/logs/watchdog.out.log";
 
 #[derive(Parser)]
@@ -79,6 +81,8 @@ struct WatchDefaults {
     confirm_after_seconds: Option<u64>,
     cooldown_seconds: Option<u64>,
     timeout_seconds: Option<u64>,
+    recovery_stabilization_seconds: Option<u64>,
+    recovery_poll_seconds: Option<u64>,
     shell: Option<Vec<String>>,
 }
 
@@ -93,8 +97,12 @@ struct WatchConfig {
     confirm_after_seconds: Option<u64>,
     cooldown_seconds: Option<u64>,
     timeout_seconds: Option<u64>,
+    recovery_stabilization_seconds: Option<u64>,
+    recovery_poll_seconds: Option<u64>,
     healthy_json_path: Option<String>,
     healthy_equals: Option<String>,
+    #[serde(default)]
+    transitional_json_values: Vec<String>,
     healthy_exit_code: Option<i32>,
     shell: Option<Vec<String>>,
 }
@@ -106,6 +114,8 @@ struct EffectiveWatch<'a> {
     confirm_after: Duration,
     cooldown: Duration,
     timeout: Duration,
+    recovery_stabilization: Duration,
+    recovery_poll: Duration,
     shell: Vec<String>,
 }
 
@@ -120,6 +130,7 @@ struct CommandOutput {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum HealthState {
     Healthy,
+    Syncing,
     Unhealthy,
 }
 
@@ -212,6 +223,12 @@ fn validate_config(config: &WatchdogConfig) -> Result<()> {
         if watch.healthy_json_path.is_some() && watch.healthy_equals.is_none() {
             bail!(
                 "watch `{}` must set healthy_equals when healthy_json_path is used",
+                watch.name
+            );
+        }
+        if !watch.transitional_json_values.is_empty() && watch.healthy_json_path.is_none() {
+            bail!(
+                "watch `{}` must set healthy_json_path when transitional_json_values is used",
                 watch.name
             );
         }
@@ -364,7 +381,7 @@ fn run_watch_cycle(
         health_label(initial),
     )?;
 
-    if initial == HealthState::Healthy {
+    if initial != HealthState::Unhealthy {
         return Ok(watch.interval);
     }
 
@@ -387,7 +404,7 @@ fn run_watch_cycle(
             health_label(confirmed),
         )?;
 
-        if confirmed == HealthState::Healthy {
+        if confirmed != HealthState::Unhealthy {
             return Ok(watch.interval);
         }
     }
@@ -420,7 +437,60 @@ fn run_watch_cycle(
         "recovery.post_check",
         health_label(post),
     )?;
-    if post != HealthState::Healthy {
+    if post == HealthState::Healthy {
+        return finish_recovery(watch, clock, logger, 0);
+    }
+    if post == HealthState::Syncing {
+        return finish_stabilizing(watch, clock, logger, 0);
+    }
+
+    log_line(
+        clock,
+        logger,
+        &watch.config.name,
+        "recovery.stabilizing",
+        &format!(
+            "seconds={} poll_seconds={}",
+            watch.recovery_stabilization.as_secs(),
+            watch.recovery_poll.as_secs()
+        ),
+    )?;
+    let stabilization_started = Instant::now();
+    let mut checks = 0;
+    let mut final_state = post;
+    while stabilization_started.elapsed() < watch.recovery_stabilization {
+        let remaining = watch
+            .recovery_stabilization
+            .saturating_sub(stabilization_started.elapsed());
+        thread::sleep(watch.recovery_poll.min(remaining));
+        checks += 1;
+        final_state = run_diagnose(watch)?;
+        log_line(
+            clock,
+            logger,
+            &watch.config.name,
+            "recovery.stabilization_check",
+            &format!("attempt={checks} {}", health_label(final_state)),
+        )?;
+        if final_state == HealthState::Healthy {
+            return finish_recovery(watch, clock, logger, checks);
+        }
+        if final_state == HealthState::Syncing {
+            return finish_stabilizing(watch, clock, logger, checks);
+        }
+    }
+
+    log_line(
+        clock,
+        logger,
+        &watch.config.name,
+        "recovery.outcome",
+        &format!(
+            "outcome=unrecovered state={} checks={checks}",
+            health_label(final_state)
+        ),
+    )?;
+    if final_state != HealthState::Healthy {
         if recovery_failed {
             bail!(
                 "recovery for `{}` failed and post-check is still unhealthy: exit_code={} timed_out={} stderr={}",
@@ -436,6 +506,22 @@ fn run_watch_cycle(
         );
     }
 
+    unreachable!("healthy stabilization state returns through finish_recovery")
+}
+
+fn finish_recovery(
+    watch: &EffectiveWatch<'_>,
+    clock: &dyn Clock,
+    logger: &mut Logger<'_>,
+    checks: u32,
+) -> Result<Duration> {
+    log_line(
+        clock,
+        logger,
+        &watch.config.name,
+        "recovery.outcome",
+        &format!("outcome=recovered state=healthy checks={checks}"),
+    )?;
     if !watch.cooldown.is_zero() {
         log_line(
             clock,
@@ -446,6 +532,22 @@ fn run_watch_cycle(
         )?;
     }
 
+    Ok(watch.interval.max(watch.cooldown))
+}
+
+fn finish_stabilizing(
+    watch: &EffectiveWatch<'_>,
+    clock: &dyn Clock,
+    logger: &mut Logger<'_>,
+    checks: u32,
+) -> Result<Duration> {
+    log_line(
+        clock,
+        logger,
+        &watch.config.name,
+        "recovery.outcome",
+        &format!("outcome=stabilizing state=syncing checks={checks}"),
+    )?;
     Ok(watch.interval.max(watch.cooldown))
 }
 
@@ -499,9 +601,17 @@ fn evaluate_health(watch: &WatchConfig, output: &CommandOutput) -> HealthState {
         };
         let expected = watch.healthy_equals.as_deref().unwrap_or_default();
 
-        if !json_value_equals(actual, expected) {
-            return HealthState::Unhealthy;
+        if json_value_equals(actual, expected) {
+            return HealthState::Healthy;
         }
+        if watch
+            .transitional_json_values
+            .iter()
+            .any(|value| json_value_equals(actual, value))
+        {
+            return HealthState::Syncing;
+        }
+        return HealthState::Unhealthy;
     }
 
     HealthState::Healthy
@@ -585,6 +695,18 @@ fn effective_watch<'a>(
                 .timeout_seconds
                 .or(config.defaults.timeout_seconds)
                 .unwrap_or(DEFAULT_TIMEOUT_SECONDS),
+        ),
+        recovery_stabilization: Duration::from_secs(
+            watch
+                .recovery_stabilization_seconds
+                .or(config.defaults.recovery_stabilization_seconds)
+                .unwrap_or(DEFAULT_RECOVERY_STABILIZATION_SECONDS),
+        ),
+        recovery_poll: Duration::from_secs(
+            watch
+                .recovery_poll_seconds
+                .or(config.defaults.recovery_poll_seconds)
+                .unwrap_or(DEFAULT_RECOVERY_POLL_SECONDS),
         ),
         shell,
     })
@@ -734,7 +856,11 @@ impl WatchStatsBuilder {
         if let Some(state) = event.fields.get("state")
             && matches!(
                 event.event.as_str(),
-                "check.result" | "check.confirm_result" | "recovery.post_check"
+                "check.result"
+                    | "check.confirm_result"
+                    | "recovery.post_check"
+                    | "recovery.stabilization_check"
+                    | "recovery.outcome"
             )
         {
             self.last_known_state = Some(state.clone());
@@ -772,6 +898,17 @@ impl WatchStatsBuilder {
                 }
             }
             "recovery.post_check" if event.fields.get("state").is_some_and(|s| s == "healthy") => {
+                if let Some(mut incident) = self.open_incident.take() {
+                    incident.recovered_at = Some(event.timestamp);
+                    self.incidents.push(incident);
+                }
+            }
+            "recovery.outcome"
+                if event
+                    .fields
+                    .get("outcome")
+                    .is_some_and(|outcome| outcome == "recovered") =>
+            {
                 if let Some(mut incident) = self.open_incident.take() {
                     incident.recovered_at = Some(event.timestamp);
                     self.incidents.push(incident);
@@ -1077,6 +1214,8 @@ interval_seconds = 600
 confirm_after_seconds = 30
 cooldown_seconds = 600
 timeout_seconds = 120
+recovery_stabilization_seconds = 120
+recovery_poll_seconds = 5
 shell = ["zsh", "-lc"]
 
 [[watch]]
@@ -1085,6 +1224,7 @@ diagnose = "belter --json service status mempool"
 recovery = "belter service bring-up mempool"
 healthy_json_path = ".data.state"
 healthy_equals = "running"
+transitional_json_values = ["syncing"]
 healthy_exit_code = 0
 "#
 }
@@ -1100,6 +1240,7 @@ fn default_enabled() -> bool {
 fn health_label(state: HealthState) -> &'static str {
     match state {
         HealthState::Healthy => "state=healthy",
+        HealthState::Syncing => "state=syncing",
         HealthState::Unhealthy => "state=unhealthy",
     }
 }
@@ -1158,8 +1299,11 @@ mod tests {
             confirm_after_seconds: None,
             cooldown_seconds: None,
             timeout_seconds: None,
+            recovery_stabilization_seconds: None,
+            recovery_poll_seconds: None,
             healthy_json_path: Some(".data.state".to_string()),
             healthy_equals: Some("running".to_string()),
+            transitional_json_values: Vec::new(),
             healthy_exit_code: Some(0),
             shell: None,
         }
@@ -1207,6 +1351,20 @@ mod tests {
     }
 
     #[test]
+    fn evaluate_health_marks_configured_syncing_state_as_transitional() {
+        let mut watch = sample_watch();
+        watch.transitional_json_values = vec!["syncing".to_string()];
+        let output = CommandOutput {
+            code: Some(0),
+            stdout: r#"{"data":{"state":"syncing"}}"#.to_string(),
+            stderr: String::new(),
+            timed_out: false,
+        };
+
+        assert_eq!(evaluate_health(&watch, &output), HealthState::Syncing);
+    }
+
+    #[test]
     fn effective_watch_uses_defaults() {
         let config = WatchdogConfig {
             version: 1,
@@ -1216,6 +1374,8 @@ mod tests {
                 confirm_after_seconds: Some(30),
                 cooldown_seconds: Some(900),
                 timeout_seconds: Some(120),
+                recovery_stabilization_seconds: Some(180),
+                recovery_poll_seconds: Some(10),
                 shell: Some(vec!["/bin/sh".to_string(), "-c".to_string()]),
             },
             watch: vec![sample_watch()],
@@ -1226,6 +1386,8 @@ mod tests {
         assert_eq!(effective.confirm_after, Duration::from_secs(30));
         assert_eq!(effective.cooldown, Duration::from_secs(900));
         assert_eq!(effective.timeout, Duration::from_secs(120));
+        assert_eq!(effective.recovery_stabilization, Duration::from_secs(180));
+        assert_eq!(effective.recovery_poll, Duration::from_secs(10));
         assert_eq!(effective.shell, vec!["/bin/sh", "-c"]);
     }
 
@@ -1258,6 +1420,8 @@ mod tests {
             confirm_after: Duration::ZERO,
             cooldown: Duration::ZERO,
             timeout: Duration::from_secs(5),
+            recovery_stabilization: Duration::ZERO,
+            recovery_poll: Duration::from_secs(1),
             shell: default_shell(),
         };
         let clock = FixedClock::new("2026-05-08T15:00:00Z");
@@ -1277,6 +1441,57 @@ mod tests {
         assert!(logs.contains("recovery.command_failure: watch=mempool"));
         assert!(logs.contains("stderr=simulated recovery command failure"));
         assert!(logs.contains("recovery.post_check: watch=mempool state=healthy"));
+        assert!(
+            logs.contains(
+                "recovery.outcome: watch=mempool outcome=recovered state=healthy checks=0"
+            )
+        );
+
+        let _ = fs::remove_file(state_path);
+    }
+
+    #[test]
+    fn watch_cycle_waits_for_delayed_recovery_readiness() {
+        let state_path = unique_temp_path("watchdog-delayed-recovery-state");
+        let _ = fs::remove_file(&state_path);
+        let mut watch = sample_watch();
+        watch.diagnose = format!(
+            "n=$(cat '{}' 2>/dev/null || echo 0); n=$((n + 1)); echo $n > '{}'; if test $n -ge 3; then printf '%s' '{{\"data\":{{\"state\":\"running\"}}}}'; else printf '%s' '{{\"data\":{{\"state\":\"degraded\"}}}}'; fi",
+            state_path.display(),
+            state_path.display()
+        );
+        watch.recovery = "true".to_string();
+        let effective = EffectiveWatch {
+            config: &watch,
+            interval: Duration::from_secs(600),
+            confirm_after: Duration::ZERO,
+            cooldown: Duration::ZERO,
+            timeout: Duration::from_secs(5),
+            recovery_stabilization: Duration::from_secs(2),
+            recovery_poll: Duration::from_secs(1),
+            shell: default_shell(),
+        };
+        let clock = FixedClock::new("2026-05-08T15:00:00Z");
+        let mut output = Vec::new();
+        let mut logger = Logger {
+            stdout: Box::new(&mut output),
+            stderr: None,
+        };
+
+        run_watch_cycle(&effective, &clock, &mut logger)
+            .expect("recovery should become healthy during stabilization");
+        drop(logger);
+        let logs = String::from_utf8(output).expect("utf8 logs");
+
+        assert!(logs.contains("recovery.post_check: watch=mempool state=unhealthy"));
+        assert!(
+            logs.contains("recovery.stabilization_check: watch=mempool attempt=1 state=healthy")
+        );
+        assert!(
+            logs.contains(
+                "recovery.outcome: watch=mempool outcome=recovered state=healthy checks=1"
+            )
+        );
 
         let _ = fs::remove_file(state_path);
     }
@@ -1371,6 +1586,28 @@ mod tests {
         assert_eq!(report.recovered, 1);
         assert_eq!(report.unrecovered, 0);
         assert_eq!(report.recovery_command_failures, 1);
+        assert_eq!(report.last_known_state.as_deref(), Some("healthy"));
+    }
+
+    #[test]
+    fn stats_counts_recovery_after_stabilization_window() {
+        let mut builder = WatchStatsBuilder::default();
+        for line in [
+            "[2026-05-10T06:37:54Z] check.confirm_result: watch=mempool state=unhealthy",
+            "[2026-05-10T06:37:55Z] recovery.start: watch=mempool",
+            "[2026-05-10T06:38:55Z] recovery.done: watch=mempool exit_code=0 timed_out=false",
+            "[2026-05-10T06:38:56Z] recovery.post_check: watch=mempool state=unhealthy",
+            "[2026-05-10T06:39:06Z] recovery.stabilization_check: watch=mempool attempt=1 state=healthy",
+            "[2026-05-10T06:39:06Z] recovery.outcome: watch=mempool outcome=recovered state=healthy checks=1",
+        ] {
+            builder.apply(parse_log_event(line).expect("parsed event"));
+        }
+
+        let report = builder.finish("mempool".to_string());
+
+        assert_eq!(report.confirmed_outages, 1);
+        assert_eq!(report.recovered, 1);
+        assert_eq!(report.unrecovered, 0);
         assert_eq!(report.last_known_state.as_deref(), Some("healthy"));
     }
 

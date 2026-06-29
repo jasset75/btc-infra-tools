@@ -38,6 +38,13 @@ This section includes implemented changes that are not released yet.
   - `service bring-up mempool` now uses `restart` for initial `degraded` state and retries `unknown` readiness failures with `restart`,
   - `service status podman_runtime` can now degrade when a dependent compose service remains up but unhealthy,
   - `service bring-up mempool` can now recognize the known `podman_runtime` forwarding failure pattern and recover by restarting `podman_runtime` before reapplying `mempool`.
+- Improved `belter-watchdog` recovery accounting for services with delayed
+  readiness:
+  - added configurable recovery stabilization polling after a recovery command,
+  - added `transitional_json_values` so states such as Mempool `syncing` do not
+    trigger repeated restarts,
+  - added explicit `recovery.outcome` events so stats distinguish recovered,
+    stabilizing, and unrecovered recoveries.
 
 ## [0.1.1] - 2026-03-31
 

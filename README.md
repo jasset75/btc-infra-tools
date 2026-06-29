@@ -51,6 +51,8 @@ interval_seconds = 600
 confirm_after_seconds = 30
 cooldown_seconds = 600
 timeout_seconds = 120
+recovery_stabilization_seconds = 120
+recovery_poll_seconds = 5
 shell = ["zsh", "-lc"]
 
 [[watch]]
@@ -59,6 +61,7 @@ diagnose = "belter --json service status mempool"
 recovery = "belter service bring-up mempool"
 healthy_json_path = ".data.state"
 healthy_equals = "running"
+transitional_json_values = ["syncing"]
 healthy_exit_code = 0
 ```
 
@@ -85,9 +88,15 @@ belter-watchdog stats --json
 By default `stats` reads `$HOME/.local/state/belter-watchdog/logs/watchdog.out.log`.
 Use `--log <path>` to read a different log file. The report includes the first and
 last parseable event timestamps in the log. A confirmed outage is counted from
-`check.confirm_result state=unhealthy`; recovery is counted only after
-`recovery.post_check state=healthy`. The command exits non-zero when the log file
-cannot be read.
+`check.confirm_result state=unhealthy`. After recovery, the watchdog polls for up
+to `recovery_stabilization_seconds` before emitting a final `recovery.outcome`.
+Only `outcome=recovered` is counted as a recovery, so delayed application
+readiness is visible in the event log. The command exits non-zero when the log
+file cannot be read.
+
+For services such as Mempool, use `transitional_json_values = ["syncing"]` to
+record a known catch-up state without repeatedly restarting it. It emits
+`outcome=stabilizing`; only `running` emits `outcome=recovered`.
 
 Clear the default watchdog event log after recording the current stats elsewhere:
 
