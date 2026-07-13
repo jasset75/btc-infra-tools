@@ -16,3 +16,6 @@ serde_json.workspace = true
 time.workspace = true
 toml.workspace = true
 infractl-core = { path = "../infractl-core" }
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true

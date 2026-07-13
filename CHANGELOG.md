@@ -23,6 +23,7 @@ This section includes implemented changes that are not released yet.
   - supports `[logging]` paths in `watchdog.toml`, creates log directories automatically, and writes normal events and error events to separate files when configured,
   - supports `belter-watchdog stats` with per-watch outage/recovery metrics, log window timestamps, and `--json` output,
   - supports `belter-watchdog clear-log` for truncating the selected watchdog event log.
+  - supports `belter-watchdog status` for checking its own runtime PID, with text and JSON output, stale-state detection, and script-friendly exit codes.
 
 ### Changed
 - Updated `service list` output to report the configured services, their managers, and declared dependencies in stable sorted order for both text and `--json`.

@@ -20,6 +20,8 @@ const DEFAULT_TIMEOUT_SECONDS: u64 = 120;
 const DEFAULT_RECOVERY_STABILIZATION_SECONDS: u64 = 120;
 const DEFAULT_RECOVERY_POLL_SECONDS: u64 = 5;
 const DEFAULT_STDOUT_LOG_PATH: &str = "$HOME/.local/state/belter-watchdog/logs/watchdog.out.log";
+const DEFAULT_RUNTIME_STATE_PATH: &str = "$HOME/.local/state/belter-watchdog/watchdog.json";
+const STATUS_NOT_RUNNING_EXIT_CODE: u8 = 3;
 
 #[derive(Parser)]
 #[command(name = "belter-watchdog")]
@@ -35,6 +37,8 @@ enum WatchdogCommand {
     Run {
         #[arg(short, long, default_value = "watchdog.toml")]
         config: PathBuf,
+        #[arg(long, default_value = DEFAULT_RUNTIME_STATE_PATH)]
+        state: String,
         #[arg(long)]
         once: bool,
     },
@@ -55,6 +59,12 @@ enum WatchdogCommand {
     ClearLog {
         #[arg(long, default_value = DEFAULT_STDOUT_LOG_PATH)]
         log: String,
+    },
+    Status {
+        #[arg(long, default_value = DEFAULT_RUNTIME_STATE_PATH)]
+        state: String,
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -139,13 +149,51 @@ struct WatchState {
     next_check: Option<Instant>,
 }
 
+#[derive(Debug, Deserialize, Serialize)]
+struct WatchdogRuntimeState {
+    pid: u32,
+    started_at: String,
+    config_path: String,
+}
+
+#[derive(Debug, Serialize)]
+struct WatchdogStatusReport {
+    state: &'static str,
+    running: bool,
+    pid: Option<u32>,
+    started_at: Option<String>,
+    config_path: Option<String>,
+    state_path: String,
+    stale: bool,
+    detail: String,
+}
+
+struct RuntimeStateGuard {
+    path: PathBuf,
+    pid: u32,
+}
+
+impl Drop for RuntimeStateGuard {
+    fn drop(&mut self) {
+        let Ok(raw) = fs::read_to_string(&self.path) else {
+            return;
+        };
+        let Ok(state) = serde_json::from_str::<WatchdogRuntimeState>(&raw) else {
+            return;
+        };
+        if state.pid == self.pid {
+            let _ = fs::remove_file(&self.path);
+        }
+    }
+}
+
 fn main() -> std::process::ExitCode {
     let cli = Cli::parse();
     let mut stdout = io::stdout();
     let mut stderr = io::stderr();
 
     match run(&cli, &SystemClock, &mut stdout) {
-        Ok(()) => std::process::ExitCode::SUCCESS,
+        Ok(exit_code) => std::process::ExitCode::from(exit_code),
         Err(error) => {
             let _ = writeln!(stderr, "Error: {error:#}");
             std::process::ExitCode::from(1)
@@ -153,15 +201,25 @@ fn main() -> std::process::ExitCode {
     }
 }
 
-fn run<W: Write>(cli: &Cli, clock: &dyn Clock, stdout: &mut W) -> Result<()> {
+fn run<W: Write>(cli: &Cli, clock: &dyn Clock, stdout: &mut W) -> Result<u8> {
     match &cli.command {
-        WatchdogCommand::Run { config, once } => {
-            let config = load_config(config)?;
-            validate_config(&config)?;
-            let mut logger = open_logger(&config.logging, stdout)?;
-            run_watchdog(&config, *once, clock, &mut logger)
+        WatchdogCommand::Run {
+            config,
+            state,
+            once,
+        } => {
+            let watchdog_config = load_config(config)?;
+            validate_config(&watchdog_config)?;
+            let state_path = expand_home(state)?;
+            let _state_guard = acquire_runtime_state(&state_path, config, clock)?;
+            let mut logger = open_logger(&watchdog_config.logging, stdout)?;
+            run_watchdog(&watchdog_config, *once, clock, &mut logger)?;
+            Ok(0)
         }
-        WatchdogCommand::Init { path, force } => init_config(path, *force, stdout),
+        WatchdogCommand::Init { path, force } => {
+            init_config(path, *force, stdout)?;
+            Ok(0)
+        }
         WatchdogCommand::Stats { log, watch, json } => {
             let stats = build_stats_report(log, watch.as_deref())?;
             if *json {
@@ -170,10 +228,174 @@ fn run<W: Write>(cli: &Cli, clock: &dyn Clock, stdout: &mut W) -> Result<()> {
             } else {
                 write_stats_report(stdout, &stats)?;
             }
-            Ok(())
+            Ok(0)
         }
-        WatchdogCommand::ClearLog { log } => clear_log(log, stdout),
+        WatchdogCommand::ClearLog { log } => {
+            clear_log(log, stdout)?;
+            Ok(0)
+        }
+        WatchdogCommand::Status { state, json } => watchdog_status(state, *json, stdout),
     }
+}
+
+fn acquire_runtime_state(
+    state_path: &Path,
+    config_path: &Path,
+    clock: &dyn Clock,
+) -> Result<RuntimeStateGuard> {
+    if let Some(existing) = read_runtime_state_if_present(state_path)?
+        && process_is_running(existing.pid)?
+    {
+        bail!(
+            "belter-watchdog is already running (pid={}, state_path={})",
+            existing.pid,
+            state_path.display()
+        );
+    }
+
+    let state = WatchdogRuntimeState {
+        pid: std::process::id(),
+        started_at: clock.now_utc_rfc3339(),
+        config_path: absolute_display_path(config_path),
+    };
+    write_runtime_state(state_path, &state)?;
+    Ok(RuntimeStateGuard {
+        path: state_path.to_path_buf(),
+        pid: state.pid,
+    })
+}
+
+fn read_runtime_state_if_present(path: &Path) -> Result<Option<WatchdogRuntimeState>> {
+    let raw = match fs::read_to_string(path) {
+        Ok(raw) => raw,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => {
+            return Err(err)
+                .with_context(|| format!("failed to read runtime state {}", path.display()));
+        }
+    };
+    let state = serde_json::from_str(&raw)
+        .with_context(|| format!("failed to parse runtime state {}", path.display()))?;
+    Ok(Some(state))
+}
+
+fn write_runtime_state(path: &Path, state: &WatchdogRuntimeState) -> Result<()> {
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create state directory {}", parent.display()))?;
+    }
+
+    let temp_path = path.with_extension(format!("json.{}.tmp", state.pid));
+    let mut serialized = serde_json::to_vec_pretty(state)?;
+    serialized.push(b'\n');
+    fs::write(&temp_path, serialized)
+        .with_context(|| format!("failed to write runtime state {}", temp_path.display()))?;
+    fs::rename(&temp_path, path)
+        .with_context(|| format!("failed to publish runtime state {}", path.display()))?;
+    Ok(())
+}
+
+fn watchdog_status<W: Write>(state_path: &str, json: bool, stdout: &mut W) -> Result<u8> {
+    let expanded = expand_home(state_path)?;
+    let report = build_watchdog_status(&expanded, process_is_running)?;
+
+    if json {
+        serde_json::to_writer_pretty(&mut *stdout, &report)?;
+        writeln!(stdout)?;
+    } else if report.running {
+        writeln!(
+            stdout,
+            "belter-watchdog is running (pid={}, started_at={}, config={})",
+            report.pid.expect("running report has pid"),
+            report.started_at.as_deref().unwrap_or("unknown"),
+            report.config_path.as_deref().unwrap_or("unknown")
+        )?;
+    } else {
+        writeln!(stdout, "belter-watchdog is not running ({})", report.detail)?;
+    }
+
+    if report.running {
+        Ok(0)
+    } else {
+        Ok(STATUS_NOT_RUNNING_EXIT_CODE)
+    }
+}
+
+fn build_watchdog_status(
+    state_path: &Path,
+    process_probe: impl Fn(u32) -> Result<bool>,
+) -> Result<WatchdogStatusReport> {
+    let Some(state) = read_runtime_state_if_present(state_path)? else {
+        return Ok(WatchdogStatusReport {
+            state: "stopped",
+            running: false,
+            pid: None,
+            started_at: None,
+            config_path: None,
+            state_path: state_path.display().to_string(),
+            stale: false,
+            detail: "runtime state file does not exist".to_string(),
+        });
+    };
+
+    let running = process_probe(state.pid)?;
+    Ok(WatchdogStatusReport {
+        state: if running { "running" } else { "stopped" },
+        running,
+        pid: Some(state.pid),
+        started_at: Some(state.started_at),
+        config_path: Some(state.config_path),
+        state_path: state_path.display().to_string(),
+        stale: !running,
+        detail: if running {
+            "runtime process is alive".to_string()
+        } else {
+            "runtime state file contains a PID that is no longer alive".to_string()
+        },
+    })
+}
+
+#[cfg(unix)]
+fn process_is_running(pid: u32) -> Result<bool> {
+    let pid = i32::try_from(pid).context("watchdog PID exceeds the platform process ID range")?;
+    if pid <= 0 {
+        bail!("watchdog runtime state contains invalid PID {pid}");
+    }
+
+    // Signal 0 performs existence and permission checks without sending a signal.
+    let result = unsafe { libc::kill(pid, 0) };
+    if result == 0 {
+        return Ok(true);
+    }
+
+    let err = io::Error::last_os_error();
+    match err.raw_os_error() {
+        Some(libc::EPERM) => Ok(true),
+        Some(libc::ESRCH) => Ok(false),
+        _ => Err(err).context(format!("failed to inspect watchdog PID {pid}")),
+    }
+}
+
+#[cfg(not(unix))]
+fn process_is_running(_pid: u32) -> Result<bool> {
+    bail!("belter-watchdog status is not supported on this platform")
+}
+
+fn absolute_display_path(path: &Path) -> String {
+    fs::canonicalize(path)
+        .unwrap_or_else(|_| {
+            if path.is_absolute() {
+                path.to_path_buf()
+            } else {
+                std::env::current_dir()
+                    .unwrap_or_else(|_| PathBuf::from("."))
+                    .join(path)
+            }
+        })
+        .display()
+        .to_string()
 }
 
 fn load_config(path: &Path) -> Result<WatchdogConfig> {
@@ -1505,6 +1727,126 @@ mod tests {
             expanded,
             PathBuf::from(home).join(".local/state/example.log")
         );
+    }
+
+    #[test]
+    fn watchdog_status_reports_stopped_without_runtime_state() {
+        let path = unique_temp_path("watchdog-missing-state.json");
+        let _ = fs::remove_file(&path);
+
+        let report = build_watchdog_status(&path, |_| Ok(true)).expect("status should build");
+
+        assert_eq!(report.state, "stopped");
+        assert!(!report.running);
+        assert!(!report.stale);
+        assert_eq!(report.pid, None);
+        assert!(report.detail.contains("does not exist"));
+    }
+
+    #[test]
+    fn watchdog_status_command_returns_three_when_stopped() {
+        let path = unique_temp_path("watchdog-command-stopped-state.json");
+        let _ = fs::remove_file(&path);
+        let mut output = Vec::new();
+
+        let exit_code = watchdog_status(path.to_str().expect("utf8 path"), false, &mut output)
+            .expect("status command should succeed");
+
+        assert_eq!(exit_code, STATUS_NOT_RUNNING_EXIT_CODE);
+        assert!(
+            String::from_utf8(output)
+                .expect("utf8 output")
+                .contains("belter-watchdog is not running")
+        );
+    }
+
+    #[test]
+    fn watchdog_status_reports_running_process() {
+        let path = unique_temp_path("watchdog-running-state.json");
+        let state = WatchdogRuntimeState {
+            pid: 4242,
+            started_at: "2026-07-13T08:00:00Z".to_string(),
+            config_path: "/tmp/watchdog.toml".to_string(),
+        };
+        write_runtime_state(&path, &state).expect("state should be written");
+
+        let report =
+            build_watchdog_status(&path, |pid| Ok(pid == 4242)).expect("status should build");
+
+        assert_eq!(report.state, "running");
+        assert!(report.running);
+        assert!(!report.stale);
+        assert_eq!(report.pid, Some(4242));
+        assert_eq!(report.started_at.as_deref(), Some("2026-07-13T08:00:00Z"));
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn watchdog_status_marks_dead_pid_state_as_stale() {
+        let path = unique_temp_path("watchdog-stale-state.json");
+        let state = WatchdogRuntimeState {
+            pid: 4242,
+            started_at: "2026-07-13T08:00:00Z".to_string(),
+            config_path: "/tmp/watchdog.toml".to_string(),
+        };
+        write_runtime_state(&path, &state).expect("state should be written");
+
+        let report = build_watchdog_status(&path, |_| Ok(false)).expect("status should build");
+
+        assert_eq!(report.state, "stopped");
+        assert!(!report.running);
+        assert!(report.stale);
+        assert_eq!(report.pid, Some(4242));
+        assert!(report.detail.contains("no longer alive"));
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn runtime_state_guard_removes_owned_state_on_drop() {
+        let state_path = unique_temp_path("watchdog-guard-state.json");
+        let config_path = unique_temp_path("watchdog-guard-config.toml");
+        let _ = fs::remove_file(&state_path);
+        fs::write(&config_path, "version = 1\n").expect("config should be written");
+        let clock = FixedClock::new("2026-07-13T08:00:00Z");
+
+        let guard = acquire_runtime_state(&state_path, &config_path, &clock)
+            .expect("runtime state should be acquired");
+        let state = read_runtime_state_if_present(&state_path)
+            .expect("state should be readable")
+            .expect("state should exist");
+        assert_eq!(state.pid, std::process::id());
+        assert_eq!(state.started_at, "2026-07-13T08:00:00Z");
+
+        drop(guard);
+        assert!(!state_path.exists());
+
+        let _ = fs::remove_file(config_path);
+    }
+
+    #[test]
+    fn watchdog_status_command_returns_zero_for_current_process() {
+        let path = unique_temp_path("watchdog-command-running-state.json");
+        let state = WatchdogRuntimeState {
+            pid: std::process::id(),
+            started_at: "2026-07-13T08:00:00Z".to_string(),
+            config_path: "/tmp/watchdog.toml".to_string(),
+        };
+        write_runtime_state(&path, &state).expect("state should be written");
+        let mut output = Vec::new();
+
+        let exit_code = watchdog_status(path.to_str().expect("utf8 path"), true, &mut output)
+            .expect("status command should succeed");
+        let report: Value =
+            serde_json::from_slice(&output).expect("JSON status output should parse");
+
+        assert_eq!(exit_code, 0);
+        assert_eq!(report["state"], "running");
+        assert_eq!(report["running"], true);
+        assert_eq!(report["pid"], std::process::id());
+
+        let _ = fs::remove_file(path);
     }
 
     #[test]

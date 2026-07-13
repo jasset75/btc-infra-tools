@@ -77,6 +77,20 @@ Run continuously under `launchd`:
 belter-watchdog run --config ~/.config/belter/watchdog.toml
 ```
 
+Check whether the continuous watchdog process is running:
+
+```bash
+belter-watchdog status
+belter-watchdog status --json
+```
+
+Continuous `run` writes its PID, start time, and config path to
+`$HOME/.local/state/belter-watchdog/watchdog.json`. `status` verifies that the
+recorded PID is still alive instead of trusting the state file alone. It exits
+with `0` when running, `3` when stopped, and `1` for invalid state or other
+errors. Use the same `--state <path>` option with `run` and `status` when running
+more than one independent watchdog instance.
+
 Summarize confirmed outages and recoveries from the watchdog event log:
 
 ```bash
