@@ -204,6 +204,9 @@ Current v1 behavior:
 Runtime semantics:
 - dry-run plans the full declared chain and does not consult runtime state,
 - real execution checks the current state of dependencies and skips healthy services,
+- a `podman_machine` runtime is `running` only when its VM state is running and its machine-specific API connection responds,
+- a running Podman VM with an unavailable API is `degraded` and is restarted during dependency bring-up,
+- Podman machine start and restart operations poll API readiness and retry one start when the VM falls back to `stopped`,
 - `mempool` readiness is stronger than compose state:
   - running containers plus successful HTTP probe are required for `running`,
   - running containers with failed readiness become `degraded`.

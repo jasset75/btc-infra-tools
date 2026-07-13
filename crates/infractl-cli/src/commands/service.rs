@@ -501,16 +501,14 @@ fn compute_status(
             }
         };
 
-        let (state, query_error) =
-            match infractl_adapters::PodmanMachineAdapter.is_running(&machine) {
-                Ok(true) => derive_podman_runtime_state(dependent_compose_issues(
-                    config,
-                    ctx.service_name,
-                    ctx.env_resolver,
-                )),
-                Ok(false) => ("stopped", None),
-                Err(err) => ("unknown", Some(err.to_string())),
-            };
+        let (state, query_error) = match infractl_adapters::PodmanMachineAdapter.status(&machine) {
+            Ok(infractl_adapters::PodmanMachineStatus::Running) => derive_podman_runtime_state(
+                dependent_compose_issues(config, ctx.service_name, ctx.env_resolver),
+            ),
+            Ok(infractl_adapters::PodmanMachineStatus::Stopped) => ("stopped", None),
+            Ok(infractl_adapters::PodmanMachineStatus::Degraded(err)) => ("degraded", Some(err)),
+            Err(err) => ("unknown", Some(err.to_string())),
+        };
 
         let message = format!(
             "status target={} ui={:?} state={state}",
@@ -1344,7 +1342,7 @@ fn build_bring_up_plan(
                 .ok_or_else(|| anyhow::anyhow!("service `{service_name}` not found in config"))?;
             let state = compute_runtime_state(service_name, service, env_resolver)?;
 
-            if let Some(action) = bring_up_action(service_name, state) {
+            if let Some(action) = bring_up_action(service_name, &service.manager, state) {
                 events.push(output_event(
                     SeverityLevel::Info,
                     "bring_up.applying",
@@ -1427,9 +1425,12 @@ fn compute_runtime_state(
                 .as_deref()
                 .ok_or_else(|| anyhow::anyhow!("service `{service_name}` is missing `machine`"))?;
             let machine = expand_placeholders(machine_tmpl, env_resolver)?;
-            match infractl_adapters::PodmanMachineAdapter.is_running(&machine) {
-                Ok(true) => Ok(RuntimeState::Running),
-                Ok(false) => Ok(RuntimeState::Stopped),
+            match infractl_adapters::PodmanMachineAdapter.status(&machine) {
+                Ok(infractl_adapters::PodmanMachineStatus::Running) => Ok(RuntimeState::Running),
+                Ok(infractl_adapters::PodmanMachineStatus::Stopped) => Ok(RuntimeState::Stopped),
+                Ok(infractl_adapters::PodmanMachineStatus::Degraded(_)) => {
+                    Ok(RuntimeState::Degraded)
+                }
                 Err(_) => Ok(RuntimeState::Unknown),
             }
         }
@@ -1470,10 +1471,18 @@ fn compute_runtime_state(
     }
 }
 
-fn bring_up_action(service_name: &str, state: RuntimeState) -> Option<ServiceAction> {
+fn bring_up_action(
+    service_name: &str,
+    manager: &str,
+    state: RuntimeState,
+) -> Option<ServiceAction> {
     match state {
         RuntimeState::Stopped | RuntimeState::Unknown => Some(ServiceAction::Start),
-        RuntimeState::Degraded if service_name == "mempool" => Some(ServiceAction::Restart),
+        RuntimeState::Degraded
+            if service_name == "mempool" || manager == PODMAN_MACHINE_MANAGER =>
+        {
+            Some(ServiceAction::Restart)
+        }
         RuntimeState::Running | RuntimeState::Syncing | RuntimeState::Degraded => None,
     }
 }
@@ -1666,7 +1675,8 @@ fn action_label(action: ServiceAction) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        DependentComposeIssue, HttpStatus, MempoolProbeStatus, RuntimeState, bring_up_action,
+        DependentComposeIssue, HttpStatus, LAUNCHD_MANAGER, MempoolProbeStatus,
+        PODMAN_COMPOSE_MANAGER, PODMAN_MACHINE_MANAGER, RuntimeState, bring_up_action,
         bring_up_retry_action_after_failed_readiness, bring_up_runtime_recovery_service,
         bring_up_runtime_retry_action_after_failed_readiness, classify_mempool_fees_status,
         derive_podman_runtime_state, mempool_health_url, mempool_probe_urls, runtime_state_label,
@@ -1713,7 +1723,19 @@ mod tests {
     #[test]
     fn bring_up_action_restarts_degraded_mempool() {
         assert!(matches!(
-            bring_up_action("mempool", RuntimeState::Degraded),
+            bring_up_action("mempool", PODMAN_COMPOSE_MANAGER, RuntimeState::Degraded),
+            Some(ServiceAction::Restart)
+        ));
+    }
+
+    #[test]
+    fn bring_up_action_restarts_degraded_podman_machine() {
+        assert!(matches!(
+            bring_up_action(
+                "container_runtime",
+                PODMAN_MACHINE_MANAGER,
+                RuntimeState::Degraded
+            ),
             Some(ServiceAction::Restart)
         ));
     }
@@ -1721,18 +1743,20 @@ mod tests {
     #[test]
     fn bring_up_action_starts_stopped_services() {
         assert!(matches!(
-            bring_up_action("mempool", RuntimeState::Stopped),
+            bring_up_action("mempool", PODMAN_COMPOSE_MANAGER, RuntimeState::Stopped),
             Some(ServiceAction::Start)
         ));
         assert!(matches!(
-            bring_up_action("bitcoind", RuntimeState::Unknown),
+            bring_up_action("bitcoind", LAUNCHD_MANAGER, RuntimeState::Unknown),
             Some(ServiceAction::Start)
         ));
     }
 
     #[test]
     fn bring_up_action_skips_syncing_mempool() {
-        assert!(bring_up_action("mempool", RuntimeState::Syncing).is_none());
+        assert!(
+            bring_up_action("mempool", PODMAN_COMPOSE_MANAGER, RuntimeState::Syncing).is_none()
+        );
         assert_eq!(runtime_state_label(RuntimeState::Syncing), "syncing");
     }
 

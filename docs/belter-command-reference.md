@@ -301,6 +301,7 @@ belter --dry-run --json service restart stratum
   - Real execution is state-aware:
     - healthy dependencies are skipped,
     - stopped or unknown dependencies are started,
+    - degraded `podman_machine` dependencies are restarted,
     - `mempool` in `degraded` state is brought up again.
   - Emits structured events such as:
     - dependency skipped because already healthy,
@@ -319,6 +320,9 @@ Current implemented specialization:
   - fails if backend/API readiness does not stabilize within the built-in retry loop.
 
 Readiness policy:
+- `podman_runtime` is `running` only when the VM state is running and `podman info` succeeds through that machine's connection
+- a running Podman VM with an unavailable API reports `degraded`
+- `service start|restart podman_runtime` polls readiness every `2s` for up to `15` checks and retries the machine start once if it returns to `stopped`
 - current implementation uses synchronous polling with exponential backoff
 - attempts: `5`
 - initial delay: `1s`

@@ -34,6 +34,9 @@ This section includes implemented changes that are not released yet.
   - overwrite repo-root `.env` and `belter.toml` into the standard config directory on each install
 - Updated `just install` and `just install-latest-stable` to install both `belter` and `belter-watchdog`.
 - Hardened Podman-backed service recovery and diagnostics:
+  - `service status podman_runtime` now requires both a running Podman machine and a responsive machine-specific API connection; a running VM with an unavailable API reports `degraded`,
+  - `service start|restart podman_runtime` now polls API readiness before succeeding and retries the machine start once if the VM returns to `stopped`,
+  - `service bring-up` now restarts a degraded `podman_machine` dependency before starting dependent services,
   - `service status mempool` now reports the real host HTTP status-line failure instead of a generic read error for keep-alive responses,
   - `service bring-up mempool` now uses `restart` for initial `degraded` state and retries `unknown` readiness failures with `restart`,
   - `service status podman_runtime` can now degrade when a dependent compose service remains up but unhealthy,

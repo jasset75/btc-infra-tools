@@ -285,13 +285,15 @@ belter service bring-up mempool
 
 For `mempool`, `bring-up` currently:
 - validates and starts `bitcoind` only if needed,
-- validates and starts `podman_runtime` only if needed,
+- validates and starts `podman_runtime` only if needed, requiring both a running VM and a responsive machine-specific Podman API connection,
+- restarts `podman_runtime` when the VM is running but its API connection is degraded,
 - starts `mempool` with its configured `env_file`,
 - waits for `http://${MEMPOOL_HOST}:${MEMPOOL_PORT}/api/v1/backend-info` to return `200`,
 - reports `running`, `degraded`, or `stopped` through `service status mempool`.
 
 Operational note:
 - `service status mempool` is stronger than a plain compose `ps`; it requires both running containers and successful HTTP readiness before returning `running`.
+- `service start|restart podman_runtime` polls API readiness every two seconds for up to 15 checks and retries `podman machine start` once if the VM returns to `stopped`.
 
 ## Development Cycle
 Feature delivery follows this loop:
