@@ -264,7 +264,7 @@ MEMPOOL_COMPOSE_OVERRIDE=$HOME/mempool-local/ops/mempool/config/docker-compose.o
 MEMPOOL_PROJECT=docker
 MEMPOOL_ENV_FILE=$HOME/mempool-local/ops/env/mempool.env
 BITCOIND_LAUNCHD_UNIT=system/com.bitcoind.node
-STRATUM_LAUNCHD_UNIT=gui/501/io.btc.public-pool
+STRATUM_LAUNCHD_UNIT=system/io.btc.public-pool
 ```
 
 Placeholder notes for `.env.example`:
