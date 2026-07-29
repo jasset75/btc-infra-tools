@@ -84,12 +84,44 @@ belter-watchdog status
 belter-watchdog status --json
 ```
 
-Continuous `run` writes its PID, start time, and config path to
-`$HOME/.local/state/belter-watchdog/watchdog.json`. `status` verifies that the
-recorded PID is still alive instead of trusting the state file alone. It exits
-with `0` when running, `3` when stopped, and `1` for invalid state or other
-errors. Use the same `--state <path>` option with `run` and `status` when running
-more than one independent watchdog instance.
+Continuous `run` holds an exclusive, non-blocking kernel lock at
+`$HOME/.local/state/belter-watchdog/watchdog.lock` and writes start time and
+config path to the adjacent `watchdog.json`. The lock, not the presence of the
+JSON file, is the authority for single-instance enforcement and `status`.
+Kernel locks are released automatically when the process exits or the host
+reboots, so a stale state file cannot prevent recovery after an unclean
+shutdown. The lock descriptor is close-on-exec and cannot leak into recovery
+commands. `status` exits with `0` while the lock is held, `3` when it is not,
+and `1` for invalid state or other errors. Use the same `--state <path>` option
+with `run` and `status` when running more than one independent watchdog
+instance.
+
+Continuous `run` handles `SIGTERM` and `SIGINT` as graceful shutdown requests.
+It interrupts watchdog sleeps, terminates an active diagnosis or recovery
+process group, logs `watchdog.stop`, explicitly releases the lock, removes the
+runtime JSON, and exits successfully. Supervisors remain responsible for
+starting, restarting, or unloading the service.
+
+Incident record (2026-07-29):
+
+- Failure: after a power outage, `launchd` repeatedly started the watchdog, but
+  each attempt exited with code `1` and Podman/mempool remained stopped.
+- Diagnosis: the previous PID remained in `watchdog.json`; macOS reused that PID
+  for an unrelated process, and the PID-existence check falsely reported an
+  already-running watchdog.
+- Fix: replace PID-based ownership with a kernel-managed lock and retain the
+  JSON file only for non-authoritative runtime metadata.
+- Validation: install the fixed binary without deleting the legacy JSON, start
+  it through `launchd`, and verify that `status --json` reports
+  `detail = "runtime lock is held"`. The watchdog confirmed the unhealthy
+  mempool state, ran recovery, started the Podman machine and all three mempool
+  containers, and classified the backend as `syncing`. A later supervised
+  restart recorded `watchdog.stop: reason=signal`, exited with code `0`, and
+  allowed the replacement instance to acquire the lock immediately.
+- Follow-up: the lock recovery succeeded and mempool continued advancing during
+  its expected post-reboot synchronization window. A transient `$updateBlocks`
+  stalled warning did not represent a persistent backend failure; the watchdog
+  correctly treated `syncing` as transitional instead of restarting it.
 
 Summarize confirmed outages and recoveries from the watchdog event log:
 

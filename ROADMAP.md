@@ -25,6 +25,10 @@ Completed:
 - [x] Add integration tests for aggregated service status
 - [x] Add a `just` workflow to install the latest stable tagged release on operator nodes
 - [x] Add `belter-watchdog` for command-based service recovery loops
+- [x] Make watchdog instance ownership reboot-safe with a kernel lock instead
+  of PID-existence checks
+- [x] Add graceful watchdog shutdown on `SIGTERM` and `SIGINT`, including
+  active child-process cancellation
 - [x] Add `mempool` sync-aware status classification:
   - `running` when backend, fees, mempool, and tip-height endpoints are healthy
   - `syncing` when backend is reachable and `/api/v1/fees/recommended` returns `503`

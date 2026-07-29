@@ -23,7 +23,7 @@ This section includes implemented changes that are not released yet.
   - supports `[logging]` paths in `watchdog.toml`, creates log directories automatically, and writes normal events and error events to separate files when configured,
   - supports `belter-watchdog stats` with per-watch outage/recovery metrics, log window timestamps, and `--json` output,
   - supports `belter-watchdog clear-log` for truncating the selected watchdog event log.
-  - supports `belter-watchdog status` for checking its own runtime PID, with text and JSON output, stale-state detection, and script-friendly exit codes.
+  - supports `belter-watchdog status` for checking its kernel-managed runtime lock, with text and JSON output, stale-state detection, and script-friendly exit codes.
 
 ### Changed
 - Updated `service list` output to report the configured services, their managers, and declared dependencies in stable sorted order for both text and `--json`.
@@ -49,6 +49,16 @@ This section includes implemented changes that are not released yet.
     trigger repeated restarts,
   - added explicit `recovery.outcome` events so stats distinguish recovered,
     stabilizing, and unrecovered recoveries.
+- Replaced `belter-watchdog` PID-based single-instance detection with an
+  exclusive, non-blocking kernel lock:
+  - stale runtime JSON and reused PIDs no longer prevent recovery after an
+    unclean shutdown or host reboot,
+  - lock descriptors are close-on-exec and cannot leak into diagnosis or
+    recovery child processes,
+  - runtime JSON now contains metadata only; lock ownership is authoritative
+    for both startup and `status`,
+  - `SIGTERM` and `SIGINT` now stop the watchdog gracefully, terminate active
+    command process groups, release the lock, and remove runtime metadata.
 
 ## [0.1.1] - 2026-03-31
 

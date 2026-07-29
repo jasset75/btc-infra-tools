@@ -19,3 +19,4 @@ infractl-core = { path = "../infractl-core" }
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
+signal-hook.workspace = true

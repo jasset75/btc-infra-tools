@@ -4,10 +4,16 @@ use infractl_core::time::{Clock, SystemClock};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
-use std::fs::{self, OpenOptions};
+use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Write};
+#[cfg(unix)]
+use std::os::fd::AsRawFd;
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 use time::OffsetDateTime;
@@ -151,7 +157,6 @@ struct WatchState {
 
 #[derive(Debug, Deserialize, Serialize)]
 struct WatchdogRuntimeState {
-    pid: u32,
     started_at: String,
     config_path: String,
 }
@@ -160,7 +165,6 @@ struct WatchdogRuntimeState {
 struct WatchdogStatusReport {
     state: &'static str,
     running: bool,
-    pid: Option<u32>,
     started_at: Option<String>,
     config_path: Option<String>,
     state_path: String,
@@ -168,23 +172,51 @@ struct WatchdogStatusReport {
     detail: String,
 }
 
+#[derive(Debug)]
 struct RuntimeStateGuard {
     path: PathBuf,
-    pid: u32,
+    _lock: File,
 }
 
 impl Drop for RuntimeStateGuard {
     fn drop(&mut self) {
-        let Ok(raw) = fs::read_to_string(&self.path) else {
-            return;
-        };
-        let Ok(state) = serde_json::from_str::<WatchdogRuntimeState>(&raw) else {
-            return;
-        };
-        if state.pid == self.pid {
-            let _ = fs::remove_file(&self.path);
-        }
+        let _ = unlock(&self._lock);
+        let _ = fs::remove_file(&self.path);
     }
+}
+
+#[derive(Clone, Debug, Default)]
+struct ShutdownToken {
+    requested: Arc<AtomicBool>,
+}
+
+impl ShutdownToken {
+    fn is_requested(&self) -> bool {
+        self.requested.load(Ordering::Relaxed)
+    }
+
+    #[cfg(test)]
+    fn request(&self) {
+        self.requested.store(true, Ordering::Relaxed);
+    }
+}
+
+#[cfg(unix)]
+fn install_shutdown_signal_handlers() -> Result<ShutdownToken> {
+    use signal_hook::consts::signal::{SIGINT, SIGTERM};
+    use signal_hook::flag;
+
+    let shutdown = ShutdownToken::default();
+    flag::register(SIGTERM, Arc::clone(&shutdown.requested))
+        .context("failed to install SIGTERM handler")?;
+    flag::register(SIGINT, Arc::clone(&shutdown.requested))
+        .context("failed to install SIGINT handler")?;
+    Ok(shutdown)
+}
+
+#[cfg(not(unix))]
+fn install_shutdown_signal_handlers() -> Result<ShutdownToken> {
+    Ok(ShutdownToken::default())
 }
 
 fn main() -> std::process::ExitCode {
@@ -213,7 +245,8 @@ fn run<W: Write>(cli: &Cli, clock: &dyn Clock, stdout: &mut W) -> Result<u8> {
             let state_path = expand_home(state)?;
             let _state_guard = acquire_runtime_state(&state_path, config, clock)?;
             let mut logger = open_logger(&watchdog_config.logging, stdout)?;
-            run_watchdog(&watchdog_config, *once, clock, &mut logger)?;
+            let shutdown = install_shutdown_signal_handlers()?;
+            run_watchdog(&watchdog_config, *once, clock, &mut logger, &shutdown)?;
             Ok(0)
         }
         WatchdogCommand::Init { path, force } => {
@@ -243,26 +276,121 @@ fn acquire_runtime_state(
     config_path: &Path,
     clock: &dyn Clock,
 ) -> Result<RuntimeStateGuard> {
-    if let Some(existing) = read_runtime_state_if_present(state_path)?
-        && process_is_running(existing.pid)?
-    {
+    ensure_parent_directory(state_path)?;
+    let lock_path = runtime_lock_path(state_path);
+    let lock = open_lock_file(&lock_path)?;
+    if !try_lock_exclusive(&lock)? {
         bail!(
-            "belter-watchdog is already running (pid={}, state_path={})",
-            existing.pid,
-            state_path.display()
+            "belter-watchdog is already running (lock_path={})",
+            lock_path.display()
         );
     }
 
     let state = WatchdogRuntimeState {
-        pid: std::process::id(),
         started_at: clock.now_utc_rfc3339(),
         config_path: absolute_display_path(config_path),
     };
     write_runtime_state(state_path, &state)?;
     Ok(RuntimeStateGuard {
         path: state_path.to_path_buf(),
-        pid: state.pid,
+        _lock: lock,
     })
+}
+
+fn runtime_lock_path(state_path: &Path) -> PathBuf {
+    state_path.with_extension("lock")
+}
+
+fn ensure_parent_directory(path: &Path) -> Result<()> {
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create state directory {}", parent.display()))?;
+    }
+    Ok(())
+}
+
+fn open_lock_file(path: &Path) -> Result<File> {
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)
+        .with_context(|| format!("failed to open watchdog lock {}", path.display()))?;
+    set_close_on_exec(&file)?;
+    Ok(file)
+}
+
+#[cfg(unix)]
+fn set_close_on_exec(file: &File) -> Result<()> {
+    let flags = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFD) };
+    if flags == -1 {
+        return Err(io::Error::last_os_error()).context("failed to read watchdog lock flags");
+    }
+    let result = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_SETFD, flags | libc::FD_CLOEXEC) };
+    if result == -1 {
+        return Err(io::Error::last_os_error())
+            .context("failed to make watchdog lock close-on-exec");
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn set_close_on_exec(_file: &File) -> Result<()> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn try_lock_exclusive(file: &File) -> Result<bool> {
+    let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    if result == 0 {
+        return Ok(true);
+    }
+
+    let err = io::Error::last_os_error();
+    if matches!(err.raw_os_error(), Some(code) if code == libc::EWOULDBLOCK || code == libc::EAGAIN)
+    {
+        return Ok(false);
+    }
+    Err(err).context("failed to acquire watchdog lock")
+}
+
+#[cfg(not(unix))]
+fn try_lock_exclusive(_file: &File) -> Result<bool> {
+    bail!("belter-watchdog locking is not supported on this platform")
+}
+
+#[cfg(unix)]
+fn unlock(file: &File) -> Result<()> {
+    let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_UN) };
+    if result == 0 {
+        return Ok(());
+    }
+    Err(io::Error::last_os_error()).context("failed to release watchdog lock")
+}
+
+#[cfg(not(unix))]
+fn unlock(_file: &File) -> Result<()> {
+    bail!("belter-watchdog locking is not supported on this platform")
+}
+
+fn runtime_lock_is_held(state_path: &Path) -> Result<bool> {
+    let lock_path = runtime_lock_path(state_path);
+    let lock = match OpenOptions::new().read(true).write(true).open(&lock_path) {
+        Ok(lock) => lock,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(err) => {
+            return Err(err)
+                .with_context(|| format!("failed to open watchdog lock {}", lock_path.display()));
+        }
+    };
+    if !try_lock_exclusive(&lock)? {
+        return Ok(true);
+    }
+    unlock(&lock)?;
+    Ok(false)
 }
 
 fn read_runtime_state_if_present(path: &Path) -> Result<Option<WatchdogRuntimeState>> {
@@ -280,14 +408,9 @@ fn read_runtime_state_if_present(path: &Path) -> Result<Option<WatchdogRuntimeSt
 }
 
 fn write_runtime_state(path: &Path, state: &WatchdogRuntimeState) -> Result<()> {
-    if let Some(parent) = path.parent()
-        && !parent.as_os_str().is_empty()
-    {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create state directory {}", parent.display()))?;
-    }
+    ensure_parent_directory(path)?;
 
-    let temp_path = path.with_extension(format!("json.{}.tmp", state.pid));
+    let temp_path = path.with_extension("tmp");
     let mut serialized = serde_json::to_vec_pretty(state)?;
     serialized.push(b'\n');
     fs::write(&temp_path, serialized)
@@ -299,7 +422,7 @@ fn write_runtime_state(path: &Path, state: &WatchdogRuntimeState) -> Result<()> 
 
 fn watchdog_status<W: Write>(state_path: &str, json: bool, stdout: &mut W) -> Result<u8> {
     let expanded = expand_home(state_path)?;
-    let report = build_watchdog_status(&expanded, process_is_running)?;
+    let report = build_watchdog_status(&expanded, runtime_lock_is_held)?;
 
     if json {
         serde_json::to_writer_pretty(&mut *stdout, &report)?;
@@ -307,8 +430,7 @@ fn watchdog_status<W: Write>(state_path: &str, json: bool, stdout: &mut W) -> Re
     } else if report.running {
         writeln!(
             stdout,
-            "belter-watchdog is running (pid={}, started_at={}, config={})",
-            report.pid.expect("running report has pid"),
+            "belter-watchdog is running (started_at={}, config={})",
             report.started_at.as_deref().unwrap_or("unknown"),
             report.config_path.as_deref().unwrap_or("unknown")
         )?;
@@ -325,62 +447,38 @@ fn watchdog_status<W: Write>(state_path: &str, json: bool, stdout: &mut W) -> Re
 
 fn build_watchdog_status(
     state_path: &Path,
-    process_probe: impl Fn(u32) -> Result<bool>,
+    lock_probe: impl Fn(&Path) -> Result<bool>,
 ) -> Result<WatchdogStatusReport> {
+    let running = lock_probe(state_path)?;
     let Some(state) = read_runtime_state_if_present(state_path)? else {
         return Ok(WatchdogStatusReport {
-            state: "stopped",
-            running: false,
-            pid: None,
+            state: if running { "running" } else { "stopped" },
+            running,
             started_at: None,
             config_path: None,
             state_path: state_path.display().to_string(),
             stale: false,
-            detail: "runtime state file does not exist".to_string(),
+            detail: if running {
+                "runtime lock is held but state file does not exist".to_string()
+            } else {
+                "runtime state file does not exist".to_string()
+            },
         });
     };
 
-    let running = process_probe(state.pid)?;
     Ok(WatchdogStatusReport {
         state: if running { "running" } else { "stopped" },
         running,
-        pid: Some(state.pid),
         started_at: Some(state.started_at),
         config_path: Some(state.config_path),
         state_path: state_path.display().to_string(),
         stale: !running,
         detail: if running {
-            "runtime process is alive".to_string()
+            "runtime lock is held".to_string()
         } else {
-            "runtime state file contains a PID that is no longer alive".to_string()
+            "runtime state file exists but its lock is not held".to_string()
         },
     })
-}
-
-#[cfg(unix)]
-fn process_is_running(pid: u32) -> Result<bool> {
-    let pid = i32::try_from(pid).context("watchdog PID exceeds the platform process ID range")?;
-    if pid <= 0 {
-        bail!("watchdog runtime state contains invalid PID {pid}");
-    }
-
-    // Signal 0 performs existence and permission checks without sending a signal.
-    let result = unsafe { libc::kill(pid, 0) };
-    if result == 0 {
-        return Ok(true);
-    }
-
-    let err = io::Error::last_os_error();
-    match err.raw_os_error() {
-        Some(libc::EPERM) => Ok(true),
-        Some(libc::ESRCH) => Ok(false),
-        _ => Err(err).context(format!("failed to inspect watchdog PID {pid}")),
-    }
-}
-
-#[cfg(not(unix))]
-fn process_is_running(_pid: u32) -> Result<bool> {
-    bail!("belter-watchdog status is not supported on this platform")
 }
 
 fn absolute_display_path(path: &Path) -> String {
@@ -541,6 +639,7 @@ fn run_watchdog(
     once: bool,
     clock: &dyn Clock,
     logger: &mut Logger<'_>,
+    shutdown: &ShutdownToken,
 ) -> Result<()> {
     let enabled: Vec<_> = config.watch.iter().filter(|watch| watch.enabled).collect();
     if enabled.is_empty() {
@@ -550,10 +649,18 @@ fn run_watchdog(
     let mut states: HashMap<String, WatchState> = HashMap::new();
 
     loop {
+        if shutdown.is_requested() {
+            log_shutdown(clock, logger)?;
+            return Ok(());
+        }
         let now = Instant::now();
         let mut next_due = now + Duration::from_secs(DEFAULT_INTERVAL_SECONDS);
 
         for watch in &enabled {
+            if shutdown.is_requested() {
+                log_shutdown(clock, logger)?;
+                return Ok(());
+            }
             let effective = effective_watch(config, watch)?;
             let state = states.entry(watch.name.clone()).or_default();
             if state.next_check.is_some_and(|due| due > now) {
@@ -561,7 +668,7 @@ fn run_watchdog(
                 continue;
             }
 
-            let next_delay = match run_watch_cycle(&effective, clock, logger) {
+            let next_delay = match run_watch_cycle(&effective, clock, logger, shutdown) {
                 Ok(next_delay) => next_delay,
                 Err(err) if once => return Err(err),
                 Err(err) => {
@@ -575,6 +682,10 @@ fn run_watchdog(
                     effective.interval.max(effective.cooldown)
                 }
             };
+            if shutdown.is_requested() {
+                log_shutdown(clock, logger)?;
+                return Ok(());
+            }
             state.next_check = Some(Instant::now() + next_delay);
             next_due = next_due.min(state.next_check.expect("set above"));
         }
@@ -584,7 +695,10 @@ fn run_watchdog(
         }
 
         let sleep_for = next_due.saturating_duration_since(Instant::now());
-        thread::sleep(sleep_for.min(Duration::from_secs(1)));
+        if sleep_until_shutdown(sleep_for.min(Duration::from_secs(1)), shutdown) {
+            log_shutdown(clock, logger)?;
+            return Ok(());
+        }
     }
 }
 
@@ -592,9 +706,12 @@ fn run_watch_cycle(
     watch: &EffectiveWatch<'_>,
     clock: &dyn Clock,
     logger: &mut Logger<'_>,
+    shutdown: &ShutdownToken,
 ) -> Result<Duration> {
     log_line(clock, logger, &watch.config.name, "check.start", "")?;
-    let initial = run_diagnose(watch)?;
+    let Some(initial) = run_diagnose(watch, shutdown)? else {
+        return Ok(Duration::ZERO);
+    };
     log_line(
         clock,
         logger,
@@ -615,9 +732,13 @@ fn run_watch_cycle(
             "check.confirm_wait",
             &format!("seconds={}", watch.confirm_after.as_secs()),
         )?;
-        thread::sleep(watch.confirm_after);
+        if sleep_until_shutdown(watch.confirm_after, shutdown) {
+            return Ok(Duration::ZERO);
+        }
 
-        let confirmed = run_diagnose(watch)?;
+        let Some(confirmed) = run_diagnose(watch, shutdown)? else {
+            return Ok(Duration::ZERO);
+        };
         log_line(
             clock,
             logger,
@@ -632,8 +753,16 @@ fn run_watch_cycle(
     }
 
     log_line(clock, logger, &watch.config.name, "recovery.start", "")?;
-    let recovery = run_shell_command(&watch.shell, &watch.config.recovery, watch.timeout)
-        .with_context(|| format!("failed to run recovery for `{}`", watch.config.name))?;
+    let recovery = run_shell_command(
+        &watch.shell,
+        &watch.config.recovery,
+        watch.timeout,
+        shutdown,
+    )
+    .with_context(|| format!("failed to run recovery for `{}`", watch.config.name))?;
+    if shutdown.is_requested() {
+        return Ok(Duration::ZERO);
+    }
     log_line(
         clock,
         logger,
@@ -651,7 +780,9 @@ fn run_watch_cycle(
         log_recovery_command_failure(clock, logger, watch, &recovery)?;
     }
 
-    let post = run_diagnose(watch)?;
+    let Some(post) = run_diagnose(watch, shutdown)? else {
+        return Ok(Duration::ZERO);
+    };
     log_line(
         clock,
         logger,
@@ -684,9 +815,14 @@ fn run_watch_cycle(
         let remaining = watch
             .recovery_stabilization
             .saturating_sub(stabilization_started.elapsed());
-        thread::sleep(watch.recovery_poll.min(remaining));
+        if sleep_until_shutdown(watch.recovery_poll.min(remaining), shutdown) {
+            return Ok(Duration::ZERO);
+        }
         checks += 1;
-        final_state = run_diagnose(watch)?;
+        let Some(next_state) = run_diagnose(watch, shutdown)? else {
+            return Ok(Duration::ZERO);
+        };
+        final_state = next_state;
         log_line(
             clock,
             logger,
@@ -797,10 +933,21 @@ fn log_recovery_command_failure(
     )
 }
 
-fn run_diagnose(watch: &EffectiveWatch<'_>) -> Result<HealthState> {
-    let output = run_shell_command(&watch.shell, &watch.config.diagnose, watch.timeout)
-        .with_context(|| format!("failed to run diagnose for `{}`", watch.config.name))?;
-    Ok(evaluate_health(watch.config, &output))
+fn run_diagnose(
+    watch: &EffectiveWatch<'_>,
+    shutdown: &ShutdownToken,
+) -> Result<Option<HealthState>> {
+    let output = run_shell_command(
+        &watch.shell,
+        &watch.config.diagnose,
+        watch.timeout,
+        shutdown,
+    )
+    .with_context(|| format!("failed to run diagnose for `{}`", watch.config.name))?;
+    if shutdown.is_requested() {
+        return Ok(None);
+    }
+    Ok(Some(evaluate_health(watch.config, &output)))
 }
 
 fn evaluate_health(watch: &WatchConfig, output: &CommandOutput) -> HealthState {
@@ -839,21 +986,42 @@ fn evaluate_health(watch: &WatchConfig, output: &CommandOutput) -> HealthState {
     HealthState::Healthy
 }
 
-fn run_shell_command(shell: &[String], command: &str, timeout: Duration) -> Result<CommandOutput> {
+fn run_shell_command(
+    shell: &[String],
+    command: &str,
+    timeout: Duration,
+    shutdown: &ShutdownToken,
+) -> Result<CommandOutput> {
     if shell.is_empty() {
         bail!("shell command prefix cannot be empty");
     }
 
-    let mut child = Command::new(&shell[0])
+    let mut child_command = Command::new(&shell[0]);
+    child_command
         .args(&shell[1..])
         .arg(command)
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(unix)]
+    child_command.process_group(0);
+
+    let mut child = child_command
         .spawn()
         .with_context(|| format!("failed to spawn command `{command}`"))?;
 
     let deadline = Instant::now() + timeout;
     loop {
+        if shutdown.is_requested() {
+            terminate_child(&mut child)?;
+            let output = child.wait_with_output()?;
+            return Ok(CommandOutput {
+                code: output.status.code(),
+                stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+                stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+                timed_out: false,
+            });
+        }
+
         if child.try_wait()?.is_some() {
             let output = child.wait_with_output()?;
             return Ok(CommandOutput {
@@ -877,6 +1045,52 @@ fn run_shell_command(shell: &[String], command: &str, timeout: Duration) -> Resu
 
         thread::sleep(Duration::from_millis(100));
     }
+}
+
+#[cfg(unix)]
+fn terminate_child(child: &mut std::process::Child) -> Result<()> {
+    let process_group = i32::try_from(child.id()).context("child PID exceeds platform range")?;
+    let result = unsafe { libc::killpg(process_group, libc::SIGTERM) };
+    if result == -1 {
+        let err = io::Error::last_os_error();
+        if err.raw_os_error() != Some(libc::ESRCH) {
+            return Err(err).context("failed to terminate watchdog child process group");
+        }
+    }
+
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while Instant::now() < deadline {
+        if child.try_wait()?.is_some() {
+            return Ok(());
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+
+    let result = unsafe { libc::killpg(process_group, libc::SIGKILL) };
+    if result == -1 {
+        let err = io::Error::last_os_error();
+        if err.raw_os_error() != Some(libc::ESRCH) {
+            return Err(err).context("failed to kill watchdog child process group");
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn terminate_child(child: &mut std::process::Child) -> Result<()> {
+    child.kill().context("failed to terminate watchdog child")
+}
+
+fn sleep_until_shutdown(duration: Duration, shutdown: &ShutdownToken) -> bool {
+    let deadline = Instant::now() + duration;
+    while Instant::now() < deadline {
+        if shutdown.is_requested() {
+            return true;
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        thread::sleep(remaining.min(Duration::from_millis(100)));
+    }
+    shutdown.is_requested()
 }
 
 fn effective_watch<'a>(
@@ -1506,6 +1720,13 @@ fn log_error(
     logger.error(&format_log_line(clock, watch, event, detail))
 }
 
+fn log_shutdown(clock: &dyn Clock, logger: &mut Logger<'_>) -> Result<()> {
+    logger.info(&format!(
+        "[{}] watchdog.stop: reason=signal",
+        clock.now_utc_rfc3339()
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1624,6 +1845,58 @@ mod tests {
     }
 
     #[test]
+    fn watchdog_exits_before_check_when_shutdown_is_requested() {
+        let config = WatchdogConfig {
+            version: 1,
+            logging: LoggingConfig::default(),
+            defaults: WatchDefaults::default(),
+            watch: vec![sample_watch()],
+        };
+        let clock = FixedClock::new("2026-07-29T15:00:00Z");
+        let shutdown = ShutdownToken::default();
+        shutdown.request();
+        let mut output = Vec::new();
+        let mut logger = Logger {
+            stdout: Box::new(&mut output),
+            stderr: None,
+        };
+
+        run_watchdog(&config, false, &clock, &mut logger, &shutdown)
+            .expect("requested shutdown should exit cleanly");
+        drop(logger);
+        let logs = String::from_utf8(output).expect("utf8 logs");
+
+        assert!(logs.contains("watchdog.stop: reason=signal"));
+        assert!(!logs.contains("check.start"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shutdown_terminates_running_child_process_group() {
+        let shutdown = ShutdownToken::default();
+        let trigger = shutdown.clone();
+        let trigger_thread = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(100));
+            trigger.request();
+        });
+        let started = Instant::now();
+
+        let output = run_shell_command(
+            &default_shell(),
+            "sleep 10",
+            Duration::from_secs(15),
+            &shutdown,
+        )
+        .expect("shutdown should terminate the child command");
+        trigger_thread.join().expect("shutdown trigger should join");
+
+        assert!(shutdown.is_requested());
+        assert!(started.elapsed() < Duration::from_secs(3));
+        assert_ne!(output.code, Some(0));
+        assert!(!output.timed_out);
+    }
+
+    #[test]
     fn watch_cycle_closes_outage_when_failed_recovery_leaves_service_healthy() {
         let state_path = unique_temp_path("watchdog-recovery-state");
         let _ = fs::remove_file(&state_path);
@@ -1652,8 +1925,9 @@ mod tests {
             stdout: Box::new(&mut output),
             stderr: None,
         };
+        let shutdown = ShutdownToken::default();
 
-        let next_delay = run_watch_cycle(&effective, &clock, &mut logger)
+        let next_delay = run_watch_cycle(&effective, &clock, &mut logger, &shutdown)
             .expect("healthy post-check should close outage");
         drop(logger);
         let logs = String::from_utf8(output).expect("utf8 logs");
@@ -1699,8 +1973,9 @@ mod tests {
             stdout: Box::new(&mut output),
             stderr: None,
         };
+        let shutdown = ShutdownToken::default();
 
-        run_watch_cycle(&effective, &clock, &mut logger)
+        run_watch_cycle(&effective, &clock, &mut logger, &shutdown)
             .expect("recovery should become healthy during stabilization");
         drop(logger);
         let logs = String::from_utf8(output).expect("utf8 logs");
@@ -1734,12 +2009,11 @@ mod tests {
         let path = unique_temp_path("watchdog-missing-state.json");
         let _ = fs::remove_file(&path);
 
-        let report = build_watchdog_status(&path, |_| Ok(true)).expect("status should build");
+        let report = build_watchdog_status(&path, |_| Ok(false)).expect("status should build");
 
         assert_eq!(report.state, "stopped");
         assert!(!report.running);
         assert!(!report.stale);
-        assert_eq!(report.pid, None);
         assert!(report.detail.contains("does not exist"));
     }
 
@@ -1761,32 +2035,28 @@ mod tests {
     }
 
     #[test]
-    fn watchdog_status_reports_running_process() {
+    fn watchdog_status_reports_held_runtime_lock() {
         let path = unique_temp_path("watchdog-running-state.json");
         let state = WatchdogRuntimeState {
-            pid: 4242,
             started_at: "2026-07-13T08:00:00Z".to_string(),
             config_path: "/tmp/watchdog.toml".to_string(),
         };
         write_runtime_state(&path, &state).expect("state should be written");
 
-        let report =
-            build_watchdog_status(&path, |pid| Ok(pid == 4242)).expect("status should build");
+        let report = build_watchdog_status(&path, |_| Ok(true)).expect("status should build");
 
         assert_eq!(report.state, "running");
         assert!(report.running);
         assert!(!report.stale);
-        assert_eq!(report.pid, Some(4242));
         assert_eq!(report.started_at.as_deref(), Some("2026-07-13T08:00:00Z"));
 
         let _ = fs::remove_file(path);
     }
 
     #[test]
-    fn watchdog_status_marks_dead_pid_state_as_stale() {
+    fn watchdog_status_marks_unlocked_runtime_state_as_stale() {
         let path = unique_temp_path("watchdog-stale-state.json");
         let state = WatchdogRuntimeState {
-            pid: 4242,
             started_at: "2026-07-13T08:00:00Z".to_string(),
             config_path: "/tmp/watchdog.toml".to_string(),
         };
@@ -1797,8 +2067,7 @@ mod tests {
         assert_eq!(report.state, "stopped");
         assert!(!report.running);
         assert!(report.stale);
-        assert_eq!(report.pid, Some(4242));
-        assert!(report.detail.contains("no longer alive"));
+        assert!(report.detail.contains("lock is not held"));
 
         let _ = fs::remove_file(path);
     }
@@ -1816,24 +2085,58 @@ mod tests {
         let state = read_runtime_state_if_present(&state_path)
             .expect("state should be readable")
             .expect("state should exist");
-        assert_eq!(state.pid, std::process::id());
         assert_eq!(state.started_at, "2026-07-13T08:00:00Z");
+
+        let duplicate = acquire_runtime_state(&state_path, &config_path, &clock)
+            .expect_err("a second watchdog must not acquire the runtime lock");
+        assert!(duplicate.to_string().contains("already running"));
 
         drop(guard);
         assert!(!state_path.exists());
 
+        let replacement = acquire_runtime_state(&state_path, &config_path, &clock)
+            .expect("the lock should be released when the guard is dropped");
+        drop(replacement);
+
+        let _ = fs::remove_file(runtime_lock_path(&state_path));
         let _ = fs::remove_file(config_path);
     }
 
     #[test]
-    fn watchdog_status_command_returns_zero_for_current_process() {
+    fn stale_legacy_pid_does_not_block_watchdog_start() {
+        let state_path = unique_temp_path("watchdog-legacy-state.json");
+        let config_path = unique_temp_path("watchdog-legacy-config.toml");
+        fs::write(
+            &state_path,
+            format!(
+                "{{\"pid\":{},\"started_at\":\"2026-07-13T08:00:00Z\",\"config_path\":\"/tmp/old.toml\"}}",
+                std::process::id()
+            ),
+        )
+        .expect("legacy state should be written");
+        fs::write(&config_path, "version = 1\n").expect("config should be written");
+        let clock = FixedClock::new("2026-07-29T13:00:00Z");
+
+        let guard = acquire_runtime_state(&state_path, &config_path, &clock)
+            .expect("a stale legacy PID must not block startup");
+        let state = read_runtime_state_if_present(&state_path)
+            .expect("state should be readable")
+            .expect("state should exist");
+        assert_eq!(state.started_at, "2026-07-29T13:00:00Z");
+
+        drop(guard);
+        let _ = fs::remove_file(runtime_lock_path(&state_path));
+        let _ = fs::remove_file(config_path);
+    }
+
+    #[test]
+    fn watchdog_status_command_returns_zero_while_lock_is_held() {
         let path = unique_temp_path("watchdog-command-running-state.json");
-        let state = WatchdogRuntimeState {
-            pid: std::process::id(),
-            started_at: "2026-07-13T08:00:00Z".to_string(),
-            config_path: "/tmp/watchdog.toml".to_string(),
-        };
-        write_runtime_state(&path, &state).expect("state should be written");
+        let config_path = unique_temp_path("watchdog-command-running-config.toml");
+        fs::write(&config_path, "version = 1\n").expect("config should be written");
+        let clock = FixedClock::new("2026-07-13T08:00:00Z");
+        let guard = acquire_runtime_state(&path, &config_path, &clock)
+            .expect("runtime state should be acquired");
         let mut output = Vec::new();
 
         let exit_code = watchdog_status(path.to_str().expect("utf8 path"), true, &mut output)
@@ -1844,9 +2147,11 @@ mod tests {
         assert_eq!(exit_code, 0);
         assert_eq!(report["state"], "running");
         assert_eq!(report["running"], true);
-        assert_eq!(report["pid"], std::process::id());
+        assert!(report.get("pid").is_none());
 
-        let _ = fs::remove_file(path);
+        drop(guard);
+        let _ = fs::remove_file(runtime_lock_path(&path));
+        let _ = fs::remove_file(config_path);
     }
 
     #[test]
