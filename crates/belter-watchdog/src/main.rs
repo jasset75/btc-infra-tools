@@ -107,6 +107,8 @@ struct WatchConfig {
     name: String,
     diagnose: String,
     recovery: String,
+    /// Exit 0 permits checks/recovery; every other outcome inhibits them.
+    allow_command: Option<String>,
     #[serde(default = "default_enabled")]
     enabled: bool,
     interval_seconds: Option<u64>,
@@ -531,6 +533,13 @@ fn validate_config(config: &WatchdogConfig) -> Result<()> {
         if watch.diagnose.trim().is_empty() {
             bail!("watch `{}` has empty diagnose command", watch.name);
         }
+        if watch
+            .allow_command
+            .as_ref()
+            .is_some_and(|value| value.trim().is_empty())
+        {
+            bail!("watch `{}` has empty allow_command", watch.name);
+        }
         if watch.recovery.trim().is_empty() {
             bail!("watch `{}` has empty recovery command", watch.name);
         }
@@ -708,6 +717,9 @@ fn run_watch_cycle(
     logger: &mut Logger<'_>,
     shutdown: &ShutdownToken,
 ) -> Result<Duration> {
+    if !recovery_allowed(watch, clock, logger, shutdown)? {
+        return Ok(watch.interval);
+    }
     log_line(clock, logger, &watch.config.name, "check.start", "")?;
     let Some(initial) = run_diagnose(watch, shutdown)? else {
         return Ok(Duration::ZERO);
@@ -736,6 +748,9 @@ fn run_watch_cycle(
             return Ok(Duration::ZERO);
         }
 
+        if !recovery_allowed(watch, clock, logger, shutdown)? {
+            return Ok(watch.interval);
+        }
         let Some(confirmed) = run_diagnose(watch, shutdown)? else {
             return Ok(Duration::ZERO);
         };
@@ -752,6 +767,11 @@ fn run_watch_cycle(
         }
     }
 
+    // Recheck after confirmation: an exclusive workload may have started
+    // while the watch was sleeping. Recovery itself must share its lease.
+    if !recovery_allowed(watch, clock, logger, shutdown)? {
+        return Ok(watch.interval);
+    }
     log_line(clock, logger, &watch.config.name, "recovery.start", "")?;
     let recovery = run_shell_command(
         &watch.shell,
@@ -775,11 +795,24 @@ fn run_watch_cycle(
         ),
     )?;
 
+    if watch.config.allow_command.is_some() && recovery.code == Some(75) && !recovery.timed_out {
+        log_line(
+            clock,
+            logger,
+            &watch.config.name,
+            "watch.paused",
+            "reason=recovery_deferred",
+        )?;
+        return Ok(watch.interval);
+    }
     let recovery_failed = is_recovery_failure(&recovery);
     if recovery_failed {
         log_recovery_command_failure(clock, logger, watch, &recovery)?;
     }
 
+    if !recovery_allowed(watch, clock, logger, shutdown)? {
+        return Ok(watch.interval);
+    }
     let Some(post) = run_diagnose(watch, shutdown)? else {
         return Ok(Duration::ZERO);
     };
@@ -817,6 +850,9 @@ fn run_watch_cycle(
             .saturating_sub(stabilization_started.elapsed());
         if sleep_until_shutdown(watch.recovery_poll.min(remaining), shutdown) {
             return Ok(Duration::ZERO);
+        }
+        if !recovery_allowed(watch, clock, logger, shutdown)? {
+            return Ok(watch.interval);
         }
         checks += 1;
         let Some(next_state) = run_diagnose(watch, shutdown)? else {
@@ -865,6 +901,41 @@ fn run_watch_cycle(
     }
 
     unreachable!("healthy stabilization state returns through finish_recovery")
+}
+
+fn recovery_allowed(
+    watch: &EffectiveWatch<'_>,
+    clock: &dyn Clock,
+    logger: &mut Logger<'_>,
+    shutdown: &ShutdownToken,
+) -> Result<bool> {
+    let Some(command) = &watch.config.allow_command else {
+        return Ok(!shutdown.is_requested());
+    };
+    let output = run_shell_command(&watch.shell, command, watch.timeout, shutdown)?;
+    if shutdown.is_requested() {
+        return Ok(false);
+    }
+    if output.code == Some(0) && !output.timed_out {
+        return Ok(true);
+    }
+    let event = if output.code == Some(75) && !output.timed_out {
+        "watch.paused"
+    } else {
+        "watch.blocked"
+    };
+    log_line(
+        clock,
+        logger,
+        &watch.config.name,
+        event,
+        &format!(
+            "reason=admission exit_code={} timed_out={}",
+            display_code(output.code),
+            output.timed_out
+        ),
+    )?;
+    Ok(false)
 }
 
 fn finish_recovery(
@@ -1737,6 +1808,7 @@ mod tests {
             name: "mempool".to_string(),
             diagnose: "diagnose".to_string(),
             recovery: "recovery".to_string(),
+            allow_command: None,
             enabled: true,
             interval_seconds: None,
             confirm_after_seconds: None,
@@ -1750,6 +1822,92 @@ mod tests {
             healthy_exit_code: Some(0),
             shell: None,
         }
+    }
+
+    #[test]
+    fn denied_or_failed_admission_never_diagnoses_or_recovers() {
+        for (command, event) in [("exit 75", "watch.paused"), ("exit 1", "watch.blocked")] {
+            let mut watch = sample_watch();
+            watch.allow_command = Some(command.to_string());
+            watch.diagnose = "exit 99".to_string();
+            watch.recovery = "exit 99".to_string();
+            let config = WatchdogConfig {
+                version: 1,
+                logging: LoggingConfig::default(),
+                defaults: WatchDefaults::default(),
+                watch: vec![watch],
+            };
+            let effective = effective_watch(&config, &config.watch[0]).unwrap();
+            let clock = FixedClock::new("2026-10-19T20:00:00Z");
+            let mut output = Vec::new();
+            let mut logger = Logger {
+                stdout: Box::new(&mut output),
+                stderr: None,
+            };
+            run_watch_cycle(&effective, &clock, &mut logger, &ShutdownToken::default()).unwrap();
+            drop(logger);
+            let logs = String::from_utf8(output).unwrap();
+            assert!(logs.contains(event));
+            assert!(!logs.contains("check.start"));
+            assert!(!logs.contains("recovery.start"));
+        }
+    }
+
+    #[test]
+    fn admission_is_rechecked_after_diagnosis() {
+        let path = unique_temp_path("admission-race");
+        let mut watch = sample_watch();
+        watch.allow_command = Some(format!("test ! -f '{}' || exit 75", path.display()));
+        watch.diagnose = format!("touch '{}'; exit 1", path.display());
+        watch.confirm_after_seconds = Some(0);
+        let config = WatchdogConfig {
+            version: 1,
+            logging: LoggingConfig::default(),
+            defaults: WatchDefaults::default(),
+            watch: vec![watch],
+        };
+        let effective = effective_watch(&config, &config.watch[0]).unwrap();
+        let clock = FixedClock::new("2026-10-19T20:00:00Z");
+        let mut output = Vec::new();
+        let mut logger = Logger {
+            stdout: Box::new(&mut output),
+            stderr: None,
+        };
+        run_watch_cycle(&effective, &clock, &mut logger, &ShutdownToken::default()).unwrap();
+        drop(logger);
+        let logs = String::from_utf8(output).unwrap();
+        assert!(logs.contains("check.start"));
+        assert!(logs.contains("watch.paused"));
+        assert!(!logs.contains("recovery.start"));
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn atomic_recovery_can_defer_without_becoming_a_failed_repair() {
+        let mut watch = sample_watch();
+        watch.allow_command = Some("exit 0".to_string());
+        watch.diagnose = "exit 1".to_string();
+        watch.recovery = "exit 75".to_string();
+        watch.confirm_after_seconds = Some(0);
+        let config = WatchdogConfig {
+            version: 1,
+            logging: LoggingConfig::default(),
+            defaults: WatchDefaults::default(),
+            watch: vec![watch],
+        };
+        let effective = effective_watch(&config, &config.watch[0]).unwrap();
+        let clock = FixedClock::new("2026-10-19T20:00:00Z");
+        let mut output = Vec::new();
+        let mut logger = Logger {
+            stdout: Box::new(&mut output),
+            stderr: None,
+        };
+        run_watch_cycle(&effective, &clock, &mut logger, &ShutdownToken::default()).unwrap();
+        drop(logger);
+        let logs = String::from_utf8(output).unwrap();
+        assert!(logs.contains("reason=recovery_deferred"));
+        assert!(!logs.contains("recovery.post_check"));
+        assert!(!logs.contains("outcome=unrecovered"));
     }
 
     #[test]
