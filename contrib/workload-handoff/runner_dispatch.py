@@ -19,17 +19,31 @@ import tomllib
 
 
 class Deferred(Exception):
-    pass
+    def __init__(self, reason, **details):
+        super().__init__(reason)
+        self.details = details
 
 
-def command(argv, timeout=20):
+def command(argv, timeout=20, *, operation=None):
+    operation = operation or Path(argv[0]).name
     try:
         result = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
         if result.returncode:
-            raise Deferred("command_failed")
+            details = {"operation": operation, "returncode": result.returncode}
+            if operation == "mining_health":
+                try:
+                    health = json.loads(result.stdout)
+                    for key in ("failed_check", "error_type"):
+                        if isinstance(health.get(key), str) and health[key].isidentifier():
+                            details[key] = health[key]
+                except (ValueError, AttributeError):
+                    pass
+            raise Deferred("command_failed", **details)
         return result.stdout
+    except subprocess.TimeoutExpired:
+        raise Deferred("command_timeout", operation=operation) from None
     except (OSError, subprocess.SubprocessError):
-        raise Deferred("command_unavailable") from None
+        raise Deferred("command_unavailable", operation=operation) from None
 
 
 @contextlib.contextmanager
@@ -68,7 +82,7 @@ class Dispatcher:
         self.stopping = False
 
     def api(self, path):
-        return json.loads(command([self.c["glab"], "api", "--hostname", self.c["gitlab_host"], path], 15))
+        return json.loads(command([self.c["glab"], "api", "--hostname", self.c["gitlab_host"], path], 15, operation="gitlab_api"))
 
     def queue_hint(self):
         # On API/configuration uncertainty, let the native runner use its own
@@ -105,7 +119,7 @@ class Dispatcher:
 
     def containers(self):
         try:
-            data = json.loads(command([self.c["podman"], "ps", "--format", "json"]))
+            data = json.loads(command([self.c["podman"], "ps", "--format", "json"], operation="container_inspection"))
             if not isinstance(data, list):
                 raise ValueError()
             owned, other = [], []
@@ -117,7 +131,7 @@ class Dispatcher:
             raise Deferred("container_state_unknown") from None
 
     def runner_present(self):
-        for line in command(["ps", "-axo", "comm=,args="]).splitlines():
+        for line in command(["ps", "-axo", "comm=,args="], operation="runner_inspection").splitlines():
             fields = line.strip().split(None, 1)
             if len(fields) == 2 and Path(fields[0]).name == "gitlab-runner":
                 if any(x in fields[1].split() for x in ("run", "run-single", "wrapper")):
@@ -141,10 +155,10 @@ class Dispatcher:
             if dry_run:
                 return "would_stop_optional_and_request_runner_admission"
             if owned:
-                command(self.c["stop_command"], 90)
+                command(self.c["stop_command"], 90, operation="optional_stop")
             if self.containers() != ([], []):
                 raise Deferred("containers_still_running")
-            command(self.c["health_command"], 20)
+            command(self.c["health_command"], 20, operation="mining_health")
             if self.stopping:
                 raise Deferred("shutdown")
             argv = self.c["admission_command"] + [self.c["runner_binary"], "run-single",
@@ -181,7 +195,7 @@ def main():
         print(json.dumps({"time": int(time.time()), "state": state}), flush=True)
         return 0
     except Deferred as error:
-        print(json.dumps({"time": int(time.time()), "state": "deferred", "reason": str(error)}), flush=True)
+        print(json.dumps({"time": int(time.time()), "state": "deferred", "reason": str(error), **error.details}), flush=True)
         return 75
 
 

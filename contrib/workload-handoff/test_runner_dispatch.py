@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from unittest.mock import Mock, patch
 
-from runner_dispatch import Deferred, Dispatcher, lease, main
+from runner_dispatch import Deferred, Dispatcher, command, lease, main
 
 
 class DispatcherTests(unittest.TestCase):
@@ -58,7 +58,7 @@ class DispatcherTests(unittest.TestCase):
         with patch.object(self.app, "queue_hint", return_value=True), \
                 patch.object(self.app, "runner_present", return_value=False), \
                 patch.object(self.app, "containers", side_effect=[([{}], []), ([], [])]), \
-                patch("runner_dispatch.command", side_effect=lambda argv, timeout: events.append(argv[0])), \
+                patch("runner_dispatch.command", side_effect=lambda argv, timeout, **kwargs: events.append(argv[0])), \
                 patch("runner_dispatch.subprocess.Popen", side_effect=spawn):
             self.assertEqual(self.app.dispatch(), "runner_finished")
         self.assertEqual(events, ["stop-optional", "read-only-health", "spawn"])
@@ -126,6 +126,24 @@ class DispatcherTests(unittest.TestCase):
                 patch.object(self.app, "queue_hint", return_value=False), \
                 patch("runner_dispatch.signal.signal"):
             self.assertEqual(main(), 0)
+
+    def test_command_failure_identifies_operation_without_command_output(self):
+        result = subprocess.CompletedProcess(["probe"], 1,
+            '{"mining_healthy":false,"failed_check":"miner_api","error_type":"URLError"}',
+            "secret-token")
+        with patch("runner_dispatch.subprocess.run", return_value=result):
+            with self.assertRaises(Deferred) as raised:
+                command(["probe", "secret-argument"], operation="mining_health")
+        self.assertEqual(raised.exception.details, {"operation": "mining_health", "returncode": 1,
+            "failed_check": "miner_api", "error_type": "URLError"})
+        self.assertNotIn("secret", str(raised.exception) + repr(raised.exception.details))
+
+    def test_command_timeout_identifies_operation(self):
+        with patch("runner_dispatch.subprocess.run", side_effect=subprocess.TimeoutExpired("probe", 1)):
+            with self.assertRaises(Deferred) as raised:
+                command(["probe"], operation="container_inspection")
+        self.assertEqual(str(raised.exception), "command_timeout")
+        self.assertEqual(raised.exception.details, {"operation": "container_inspection"})
 
 
 if __name__ == "__main__":

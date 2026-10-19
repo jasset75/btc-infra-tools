@@ -60,4 +60,18 @@ These checks serialize cooperating entry points. An administrator can bypass the
 
 The optional `mining_health.py --config handoff.toml` probe checks Core synchronization, enabled/connected P2P, primary Stratum selection, positive reported hash rate and an established miner TCP peer. Its `[mining]` config supplies `bitcoin_cli`, `miner_url`, `stratum_host`, `stratum_port` and `tcp_peer`; it never changes these services. Exit 0 confirms the snapshot; exit 1 inhibits admission. This does not test found-block submission or promise future availability.
 
+For a launchd job that cannot read the node's data volume, configure the probe's optional loopback RPC client instead of accessing the data directory through `bitcoin-cli`:
+
+```toml
+[mining.rpc]
+endpoint = "http://127.0.0.1:8332/"
+credentials_file = "<config_dir>/existing-rpc-client.env"
+user_key = "RPC_USER"
+password_key = "RPC_PASSWORD"
+```
+
+The referenced environment file contains existing RPC credentials as literal `KEY=value` assignments, optionally quoted or prefixed with `export`. Keep its restrictive permissions; the probe reads it without executing shell code, copying credentials, or changing the node or its existing client. The endpoint must be loopback. Proxies and HTTP redirects are disabled, credentials are sent only in the authorization header, and the only supported RPC calls are `getblockchaininfo` and `getnetworkinfo`, each with a five-second timeout. When `[mining.rpc]` is present, `bitcoin_cli` is not invoked; configurations without that table retain the CLI behavior. All other mining-health requirements remain enforced.
+
+Failed dispatcher commands report the operation and exit code; timeouts report the operation. A failed mining probe also reports its check stage and exception type when available. Command arguments, exception messages, subprocess output and credentials are excluded. Use these fields to distinguish a host-resource deferral from a failed probe or unavailable container runtime before changing services.
+
 Run the focused lightweight tests with `python3 -m unittest discover -s contrib/workload-handoff -p 'test_*.py'`. Run Rust compilation/tests through the shared host admission command.
