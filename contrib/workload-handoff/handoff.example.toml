@@ -1,4 +1,5 @@
 version = 1
+runner_managed_externally = true
 state_dir = "$HOME/.local/state/belter-handoff"
 poll_seconds = 60
 settle_seconds = 120

@@ -37,6 +37,8 @@ Monorepo for `belter`, a Rust CLI/TUI for infrastructure operations.
 
 `belter-watchdog` is a small command-based recovery loop for services that should be kept available without embedding service-specific recovery logic in the watchdog itself.
 
+Runner activation remains independent of the watchdog and the optional-workload supervisor; see the [independent runner design](contrib/workload-handoff/README.md#independent-runner-activation).
+
 An optional `allow_command` inhibits checks and recovery unless it exits 0. Exit 75 records an intentional pause; errors/timeouts block recovery. It is checked before diagnosis and again before repair. Recovery must also use an atomic shared lease when coordinating competing workloads; see [workload handoff](contrib/workload-handoff/README.md).
 
 Example config:

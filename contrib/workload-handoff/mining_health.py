@@ -2,10 +2,26 @@
 """Read-only mining health probe; all host details come from external TOML."""
 import argparse
 import json
+import os
+from pathlib import Path
+import subprocess
 import sys
+import tomllib
 import urllib.request
 
-from handoff import load_config, run
+
+def expand(value):
+    if isinstance(value, str):
+        return os.path.expandvars(os.path.expanduser(value))
+    if isinstance(value, list):
+        return [expand(x) for x in value]
+    if isinstance(value, dict):
+        return {k: expand(v) for k, v in value.items()}
+    return value
+
+
+def run(argv, timeout=5):
+    return subprocess.run(argv, capture_output=True, text=True, check=True, timeout=timeout)
 
 
 def healthy(blockchain, network, miner, tcp, config):
@@ -23,7 +39,7 @@ def healthy(blockchain, network, miner, tcp, config):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", required=True)
-    config = load_config(parser.parse_args().config)["mining"]
+    config = expand(tomllib.loads(Path(parser.parse_args().config).read_text()))["mining"]
     try:
         blockchain = json.loads(run(config["bitcoin_cli"] + ["getblockchaininfo"], timeout=5).stdout)
         network = json.loads(run(config["bitcoin_cli"] + ["getnetworkinfo"], timeout=5).stdout)

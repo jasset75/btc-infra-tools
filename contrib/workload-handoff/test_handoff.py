@@ -78,6 +78,24 @@ class SafetyTests(unittest.TestCase):
         self.app.tick()
         self.assertEqual(self.app.calls, ["stop", "job"])
 
+    def test_external_runner_is_never_launched_by_coordinator(self):
+        self.app.c["runner_managed_externally"] = True
+        self.app.pending = True
+        self.app.owned = [{"id": "optional"}]
+        self.app.tick()
+        self.assertEqual(self.app.calls, ["stop"])
+        self.assertEqual(self.app.last_event["state"], "ci_pending")
+
+    def test_short_external_job_also_requires_fresh_settling(self):
+        self.app.normal_since = 0
+        self.app.clock = 180
+        self.app.event("optional_allowed")
+        (self.app.root / "runner-finished.json").write_text(json.dumps({"time": time.time()}))
+        self.assertEqual(self.app.gate(), "runner_settling")
+        self.app.tick()
+        self.assertNotIn("start", self.app.calls)
+        self.assertIsNone(self.app.normal_since)
+
     def test_recovery_requires_two_minutes_of_normal_pressure(self):
         self.app.tick()
         self.app.clock = 119

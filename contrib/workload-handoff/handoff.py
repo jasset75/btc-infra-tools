@@ -181,6 +181,8 @@ class Handoff:
             return "other_containers_active"
         if self.queue():
             return "ci_pending"
+        if not self.runner_settled():
+            return "runner_settling"
         if not self.cooldown_ready():
             return "startup_cooldown"
         # The supervisor publishes a readiness lease only after sustained normal
@@ -193,6 +195,15 @@ class Handoff:
         except (OSError, ValueError, KeyError, TypeError):
             return "supervisor_not_ready"
         return None
+
+    def runner_settled(self):
+        try:
+            stamp = json.loads((self.root / "runner-finished.json").read_text())["time"]
+            return time.time() - stamp >= self.c["settle_seconds"]
+        except FileNotFoundError:
+            return True
+        except (OSError, ValueError, KeyError, TypeError):
+            return False
 
     def cooldown_ready(self):
         try:
@@ -273,6 +284,9 @@ class Handoff:
                 self.normal_since = None
                 if dry_run:
                     self.event("would_stop_optional_then_run_one_job")
+                elif self.c.get("runner_managed_externally", False):
+                    self.stop_optional(fd)
+                    self.event("ci_pending")
                 else:
                     self.run_job(fd)
                 return
@@ -280,6 +294,10 @@ class Handoff:
                 if not dry_run:
                     self.stop_optional(fd)
                 self.event("manual_pause")
+                return
+            if not self.runner_settled():
+                self.normal_since = None
+                self.event("runner_settling")
                 return
             if self.normal_since is None:
                 self.normal_since = self.now()
