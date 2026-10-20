@@ -61,7 +61,7 @@ class DispatcherTests(unittest.TestCase):
                 patch("runner_dispatch.command", side_effect=lambda argv, timeout, **kwargs: events.append(argv[0])), \
                 patch("runner_dispatch.subprocess.Popen", side_effect=spawn):
             self.assertEqual(self.app.dispatch(), "runner_finished")
-        self.assertEqual(events, ["stop-optional", "read-only-health", "spawn"])
+        self.assertEqual(events, ["stop-optional", "read-only-health", "spawn", "read-only-health"])
         self.assertTrue((self.app.root / "runner-finished.json").exists())
 
     def test_stop_failure_or_foreign_containers_never_spawn_runner(self):
@@ -83,8 +83,46 @@ class DispatcherTests(unittest.TestCase):
                 patch.object(self.app, "containers", return_value=([], [])), \
                 patch("runner_dispatch.command", return_value=""), \
                 patch("runner_dispatch.subprocess.Popen", return_value=child):
-            with self.assertRaisesRegex(Deferred, "runner_deferred_or_failed"):
+            with self.assertRaisesRegex(Deferred, "runner_admission_deferred"):
                 self.app.dispatch()
+
+    def test_runner_only_profile_does_not_change_optional_admission(self):
+        self.app.c["runner_admission_command"] = ["host-admission", "--ci-runner", "--"]
+        child = Mock()
+        child.wait.return_value = 0
+        with patch.object(self.app, "queue_hint", return_value=True), \
+                patch.object(self.app, "runner_present", return_value=False), \
+                patch.object(self.app, "containers", return_value=([], [])), \
+                patch("runner_dispatch.command", return_value=""), \
+                patch("runner_dispatch.subprocess.Popen", return_value=child) as spawn:
+            self.assertEqual(self.app.dispatch(), "runner_finished")
+        argv = spawn.call_args.args[0]
+        self.assertEqual(argv[:3], ["host-admission", "--ci-runner", "--"])
+        self.assertEqual(argv[-4:], ["--max-builds", "1", "--wait-timeout", "60"])
+        self.assertEqual(self.app.c["admission_command"], ["host-admission"])
+
+    def test_failed_health_never_claims_work_even_with_runner_profile(self):
+        self.app.c["runner_admission_command"] = ["host-admission", "--ci-runner", "--"]
+        with patch.object(self.app, "queue_hint", return_value=True), \
+                patch.object(self.app, "runner_present", return_value=False), \
+                patch.object(self.app, "containers", return_value=([], [])), \
+                patch("runner_dispatch.command", side_effect=Deferred("mining_unhealthy")), \
+                patch("runner_dispatch.subprocess.Popen") as spawn:
+            with self.assertRaisesRegex(Deferred, "mining_unhealthy"):
+                self.app.dispatch()
+            spawn.assert_not_called()
+
+    def test_completed_runner_is_followed_by_health_check(self):
+        child = Mock()
+        child.wait.return_value = 0
+        with patch.object(self.app, "queue_hint", return_value=True), \
+                patch.object(self.app, "runner_present", return_value=False), \
+                patch.object(self.app, "containers", return_value=([], [])), \
+                patch("runner_dispatch.command", side_effect=["", Deferred("mining_unhealthy")]), \
+                patch("runner_dispatch.subprocess.Popen", return_value=child):
+            with self.assertRaisesRegex(Deferred, "mining_unhealthy"):
+                self.app.dispatch()
+            child.send_signal.assert_not_called()
 
     def test_dry_run_never_stops_containers_or_spawns_runner(self):
         with patch.object(self.app, "queue_hint", return_value=True), \

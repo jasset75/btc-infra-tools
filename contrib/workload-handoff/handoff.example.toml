@@ -14,6 +14,8 @@ runner_config = "$HOME/.gitlab-runner/config.toml"
 runner_name = "local-podman-runner"
 compose_project = "optional"
 admission_command = ["python3", "<host_policy>/budget.py", "--"]
+# Opt in only when the host policy validates bounded single-job CI at warning pressure.
+# runner_admission_command = ["python3", "<host_policy>/budget.py", "--ci-runner", "--"]
 health_command = ["python3", "<host_policy>/protected-health.py"]
 start_command = ["podman-compose", "-p", "optional", "-f", "<config_dir>/compose.yml", "up", "-d", "--no-build", "--pull", "never"]
 stop_command = ["podman-compose", "-p", "optional", "-f", "<config_dir>/compose.yml", "down"]

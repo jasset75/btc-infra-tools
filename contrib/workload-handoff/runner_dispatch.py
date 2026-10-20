@@ -161,7 +161,8 @@ class Dispatcher:
             command(self.c["health_command"], 20, operation="mining_health")
             if self.stopping:
                 raise Deferred("shutdown")
-            argv = self.c["admission_command"] + [self.c["runner_binary"], "run-single",
+            admission = self.c.get("runner_admission_command", self.c["admission_command"])
+            argv = admission + [self.c["runner_binary"], "run-single",
                     "--config", self.c["runner_config"], "--runner", self.c["runner_name"],
                     "--max-builds", "1", "--wait-timeout", "60"]
             with open(self.root / "runner.log", "a") as log:
@@ -173,8 +174,13 @@ class Dispatcher:
                     tmp = self.root / ("runner-finished.%s.tmp" % os.getpid())
                     tmp.write_text(json.dumps({"time": time.time()}))
                     os.replace(tmp, self.root / "runner-finished.json")
+            if code == 75:
+                raise Deferred("runner_admission_deferred", returncode=code)
+            # The native runner has finished cleanup; health is checked again
+            # without changing its completed GitLab job or protected services.
+            command(self.c["health_command"], 20, operation="mining_health")
             if code:
-                raise Deferred("runner_deferred_or_failed")
+                raise Deferred("runner_failed", returncode=code)
             return "runner_finished"
 
 

@@ -26,7 +26,35 @@ Set `runner_managed_externally = true` at the top level of `handoff.toml`. Run `
 
 The dispatcher exits between activations and remains in the foreground only while a runner is polling or executing a job. It shares no imports, liveness checks or readiness requirements with `handoff.py` or Belter. The mining probe is also independent of the supervisor module. A failed optional coordinator therefore cannot prevent native GitLab polling by requiring a healthy coordinator process, status file or successful `glab` call. A running coordinator may briefly hold the shared workload lease while checking or changing the optional project; the dispatcher retries at its next activation. The lease is inherited by the native runner, and an unreaped runner receives only SIGQUIT on dispatcher shutdown so its active job can finish.
 
-The dispatcher returns 0 after an idle activation or a completed runner invocation, 75 when resource admission or a workload lease defers it, and nonzero for unexpected configuration/I/O errors. Native runner output goes to `runner.log`; dispatcher events contain no command output or credentials. `--dry-run` performs queue/container inspection without stopping workloads or spawning a runner. GitLab's remote pause remains respected. Memory pressure, an unavailable Podman API, failed mining health or foreign workloads still defer local CI without claiming a job. This resource policy is intentional; CI is not guaranteed to run on an unhealthy or resource-constrained host.
+The dispatcher returns 0 after an idle activation or a completed runner invocation, 75 when resource admission or a workload lease defers it, and nonzero for unexpected configuration/I/O errors. Native runner output goes to `runner.log`; dispatcher events contain no command output or credentials. `--dry-run` performs queue/container inspection without stopping workloads or spawning a runner. GitLab's remote pause remains respected. Disallowed memory pressure, an unavailable Podman API, failed mining health or foreign workloads still defer local CI without claiming a job. This resource policy is intentional; CI is not guaranteed to run on an unhealthy or resource-constrained host.
+
+### Runner-specific memory policy
+
+An optional `runner_admission_command` overrides `admission_command` only in the
+independent dispatcher. Without it, behavior is unchanged. This allows an
+explicitly authorized host policy to admit bounded CI at warning pressure while
+optional services, previews and local builds continue to require normal pressure.
+For a host guard implementing the bounded runner profile:
+
+```toml
+runner_admission_command = ["python3", "<host_policy>/budget.py", "--ci-runner", "--"]
+```
+
+The host profile must validate the exact single-job native runner invocation and
+its container limits before allowing warning pressure: concurrency one, Docker
+executor, memory at most 1536 MiB with no additional container swap, two CPUs or
+less, no service sidecars, no privileged containers and OOM termination enabled.
+Keep the VM bounded separately. Critical/unknown pressure still blocks new work;
+the shared host lease still serializes CI with other guarded work. Never apply
+the runner profile to the optional project's `admission_command`.
+
+Mining health is checked both before admission and after the native runner exits.
+Exit 75 from admission reports `runner_admission_deferred`; another nonzero native
+exit reports `runner_failed`, both with the exit code and without raw output.
+A failed post-run probe reports its fixed check stage; it does not rewrite the
+completed GitLab job or signal protected services. No resident monitor or active
+job termination is added. Remove the runner override to roll back on the next
+activation without interrupting an existing job.
 
 A completion timestamp enforces settling even when a short job starts and finishes between coordinator observations. No optional-workload restart is authorized by the runner. If the supervisor or Belter fails, CI can proceed independently; automatic optional-workload recovery may remain unavailable. The legacy combined supervisor mode remains available only when `runner_managed_externally` is false or absent; never deploy that mode alongside the independent dispatcher.
 
@@ -44,7 +72,7 @@ The watchdog checks `allow_command` before diagnosis and immediately before reco
 ## Deployment and rollback
 
 1. Back up the runner LaunchAgent, watchdog configuration/binary and Compose override. Keep credentials out of version control and logs.
-2. Validate the watchdog build and Python tests. Verify Core, P2P and primary-miner connectivity. Do not start workloads under warning/unknown memory pressure.
+2. Validate the watchdog build and Python tests. Verify Core, P2P and primary-miner connectivity. Optional work still requires normal pressure; warning admits CI only with an explicitly authorized bounded runner profile. Unknown/critical pressure never admits new work.
 3. Drain the old runner using its main PID and SIGQUIT, preserving active work; disable automatic respawning first. Confirm it has exited and no job/helper container remains. Never terminate a job to make the switch.
 4. Set external-runner mode and install the independent runner LaunchAgent described above. Run the optional supervisor separately under launchd with `AbandonProcessGroup=true`, `KeepAlive=true`, a 60-second throttle and the correct PATH. The old persistent runner service must remain disabled. Never run both admission models intentionally.
 5. Install the guarded watchdog configuration. Keep recovery restricted to the optional project; do not use dependency bring-up commands that might alter protected services.
