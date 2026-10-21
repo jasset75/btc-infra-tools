@@ -24,6 +24,29 @@ Exit 0 means completed; 75 means deferred/inhibited. Unexpected configuration or
 
 Set `runner_managed_externally = true` at the top level of `handoff.toml`. Run `runner_dispatch.py --config <config_dir>/handoff.toml` from the runner's own LaunchAgent with `RunAtLoad=true`, `StartInterval=60`, `AbandonProcessGroup=true`, a bounded `ExitTimeOut` (for example 30 seconds), and no `KeepAlive`. Keep the original persistent runner daemon disabled. launchd does not overlap activations of a running job; an additional OS lock also protects manual invocations.
 
+To avoid waiting for another periodic activation between validation and deployment,
+set `runner_max_activations = 2` in the same configuration. The default remains one;
+the accepted range is 1–4. Each activation still runs the exact guarded
+`run-single --max-builds 1 --wait-timeout 60` command. Native cleanup and the
+post-run health check finish before another activation can begin. Queue eligibility,
+remote pause, process/container exclusion, mining health and host admission are
+checked again for every activation, with the workload and host locks reacquired.
+An empty queue, shutdown, failed health check or admission deferral ends the burst;
+there is no retry loop and no increase in concurrency. Dry-run checks only once.
+The JSON result includes the number of completed runner activations (not a claim
+about how many jobs the native runner received). Exit 0 means an idle/successful
+activation; exit 75 retains the existing deferral behavior, even after an earlier
+activation completed successfully.
+
+The runner LaunchAgent may use `StartInterval=15` to reduce initial queue latency.
+This only increases lightweight queue checks while idle; the optional supervisor's
+60-second polling, 120-second settling and recovery cooldown stay unchanged. Apply
+LaunchAgent changes only while the dispatcher and runner are idle, under the
+dispatcher lock, and preserve `AbandonProcessGroup=true`. Do not unload a running
+dispatcher to change its interval. To roll back, restore `runner_max_activations=1`
+and the 60-second runner interval at an idle boundary. No protected service needs
+to be restarted or signalled.
+
 The dispatcher exits between activations and remains in the foreground only while a runner is polling or executing a job. It shares no imports, liveness checks or readiness requirements with `handoff.py` or Belter. The mining probe is also independent of the supervisor module. A failed optional coordinator therefore cannot prevent native GitLab polling by requiring a healthy coordinator process, status file or successful `glab` call. A running coordinator may briefly hold the shared workload lease while checking or changing the optional project; the dispatcher retries at its next activation. The lease is inherited by the native runner, and an unreaped runner receives only SIGQUIT on dispatcher shutdown so its active job can finish.
 
 The dispatcher returns 0 after an idle activation or a completed runner invocation, 75 when resource admission or a workload lease defers it, and nonzero for unexpected configuration/I/O errors. Native runner output goes to `runner.log`; dispatcher events contain no command output or credentials. `--dry-run` performs queue/container inspection without stopping workloads or spawning a runner. GitLab's remote pause remains respected. Disallowed memory pressure, an unavailable Podman API, failed mining health or foreign workloads still defer local CI without claiming a job. This resource policy is intentional; CI is not guaranteed to run on an unhealthy or resource-constrained host.

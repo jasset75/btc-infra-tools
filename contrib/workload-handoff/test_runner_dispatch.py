@@ -33,6 +33,63 @@ class DispatcherTests(unittest.TestCase):
             self.assertEqual(self.app.dispatch(), "no_pending_work")
             containers.assert_not_called()
 
+    def test_burst_limit_is_bounded_and_opt_in(self):
+        self.assertEqual(self.app.max_activations, 1)
+        for value in [0, 5, -1, True, "2", 2.0]:
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, "runner_max_activations"):
+                Dispatcher({**self.app.c, "runner_max_activations": value})
+
+    def test_burst_stops_at_limit_and_keeps_native_single_job_invocation(self):
+        self.app.max_activations = 2
+        events = []
+        def spawn(*args, **kwargs):
+            self.assertEqual(args[0][-4:], ["--max-builds", "1", "--wait-timeout", "60"])
+            events.append("spawn")
+            child = Mock()
+            child.wait.side_effect = lambda: events.append("complete") or 0
+            return child
+        with patch.object(self.app, "queue_hint", return_value=True) as queue, \
+                patch.object(self.app, "runner_present", return_value=False), \
+                patch.object(self.app, "containers", return_value=([], [])), \
+                patch("runner_dispatch.command", side_effect=lambda *a, **kw: events.append("health")), \
+                patch("runner_dispatch.subprocess.Popen", side_effect=spawn):
+            self.assertEqual(self.app.dispatch_burst(), "runner_finished")
+        self.assertEqual(self.app.completed_activations, 2)
+        self.assertEqual(queue.call_count, 2)
+        self.assertEqual(events, ["health", "spawn", "complete", "health"] * 2)
+        with lease(self.app.root / "workload.lock"):
+            pass
+
+    def test_burst_stops_when_queue_is_empty_or_runner_is_paused(self):
+        self.app.max_activations = 4
+        with patch.object(self.app, "dispatch", side_effect=["runner_finished", "no_pending_work"]) as dispatch:
+            self.assertEqual(self.app.dispatch_burst(), "runner_finished")
+        self.assertEqual(dispatch.call_count, 2)
+        self.assertEqual(self.app.completed_activations, 1)
+
+    def test_burst_never_retries_admission_or_health_deferral(self):
+        self.app.max_activations = 4
+        for reason in ["runner_admission_deferred", "command_failed"]:
+            with self.subTest(reason=reason), \
+                    patch.object(self.app, "dispatch", side_effect=["runner_finished", Deferred(reason)]) as dispatch:
+                with self.assertRaisesRegex(Deferred, reason):
+                    self.app.dispatch_burst()
+                self.assertEqual(dispatch.call_count, 2)
+
+    def test_burst_shutdown_and_dry_run_do_not_start_followup_activation(self):
+        self.app.max_activations = 4
+        def finish():
+            self.app.stopping = True
+            return "runner_finished"
+        with patch.object(self.app, "dispatch", side_effect=lambda *_: finish()) as dispatch:
+            self.assertEqual(self.app.dispatch_burst(), "runner_finished")
+            dispatch.assert_called_once()
+        self.app.stopping = False
+        self.app.completed_activations = 0
+        with patch.object(self.app, "dispatch", return_value="would_stop_optional_and_request_runner_admission") as dispatch:
+            self.assertEqual(self.app.dispatch_burst(True), "would_stop_optional_and_request_runner_admission")
+            dispatch.assert_called_once_with(True)
+
     def test_matching_jobs_and_unknown_scope_wake_native_runner(self):
         for response in ([self.runner(), [{"tag_list": ["local"]}]], [{"id": 1}], [{"id": 9, "paused": True}]):
             with patch.object(self.app, "api", side_effect=response):

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""One independent GitLab Runner activation with optional-workload preflight.
+"""Bounded serial GitLab Runner activations with optional-workload preflight.
 
 Run periodically through the runner's own service manager. No watchdog or handoff
 process/status is required. Queue API access is an optimization, never a gate.
@@ -80,6 +80,10 @@ class Dispatcher:
         self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
         self.child = None
         self.stopping = False
+        self.completed_activations = 0
+        self.max_activations = config.get("runner_max_activations", 1)
+        if type(self.max_activations) is not int or not 1 <= self.max_activations <= 4:
+            raise ValueError("runner_max_activations must be an integer from 1 to 4")
 
     def api(self, path):
         return json.loads(command([self.c["glab"], "api", "--hostname", self.c["gitlab_host"], path], 15, operation="gitlab_api"))
@@ -183,6 +187,19 @@ class Dispatcher:
                 raise Deferred("runner_failed", returncode=code)
             return "runner_finished"
 
+    def dispatch_burst(self, dry_run=False):
+        # Each activation releases the workload/host leases after native cleanup
+        # and repeats queue, container, health and host-admission checks. A busy
+        # guard or failed health check exits immediately; it is never retried here.
+        for _ in range(1 if dry_run else self.max_activations):
+            if self.stopping:
+                break
+            state = self.dispatch(dry_run)
+            if state != "runner_finished":
+                return "runner_finished" if self.completed_activations else state
+            self.completed_activations += 1
+        return "runner_finished" if self.completed_activations else "no_pending_work"
+
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
@@ -197,11 +214,13 @@ def main():
     signal.signal(signal.SIGINT, app.shutdown)
     try:
         with lease(app.root / "runner-dispatch.lock"):
-            state = app.dispatch(args.dry_run)
-        print(json.dumps({"time": int(time.time()), "state": state}), flush=True)
+            state = app.dispatch_burst(args.dry_run)
+        print(json.dumps({"time": int(time.time()), "state": state,
+                          "activations": app.completed_activations}), flush=True)
         return 0
     except Deferred as error:
-        print(json.dumps({"time": int(time.time()), "state": "deferred", "reason": str(error), **error.details}), flush=True)
+        print(json.dumps({"time": int(time.time()), "state": "deferred", "reason": str(error),
+                          "activations": app.completed_activations, **error.details}), flush=True)
         return 75
 
 
